@@ -21,6 +21,8 @@ Mutators take a reference to a list as first arg.
 */
 
 #include "word_count.h"
+#include <stdio.h>
+#include <unistd.h>
 
 /* Basic utilities */
 
@@ -32,13 +34,22 @@ char *new_string(char *str) {
   return strcpy(new_str, str);
 }
 
+//为什么这里要传递二次指针？
 int init_words(WordCount **wclist) {
   /* Initialize word count.
      Returns 0 if no errors are encountered
      in the body of this function; 1 otherwise.
   */
-  *wclist = NULL;
-  return 0;
+
+  *wclist = (WordCount *)malloc(sizeof(WordCount));
+  if(*wclist){
+    (*wclist)->next = NULL;
+    (*wclist)->word = NULL;
+    (*wclist)->count = 1;
+    return 0;
+  }
+  else
+    return 1;
 }
 
 ssize_t len_words(WordCount *wchead) {
@@ -52,8 +63,19 @@ ssize_t len_words(WordCount *wchead) {
 
 WordCount *find_word(WordCount *wchead, char *word) {
   /* Return count for word, if it exists */
-  WordCount *wc = NULL;
-  return wc;
+  if(wchead == NULL || word == NULL)
+    return NULL;
+
+  WordCount *wc = wchead;
+  while(wc != NULL){
+    if(wc->word == NULL) continue;
+    if(strcmp(wc->word,word) == 0){
+      return wc;
+    }
+    wc = wc->next;
+  }
+
+  return NULL;
 }
 
 int add_word(WordCount **wclist, char *word) {
@@ -61,7 +83,24 @@ int add_word(WordCount **wclist, char *word) {
      Otherwise insert with count 1.
      Returns 0 if no errors are encountered in the body of this function; 1 otherwise.
   */
- return 0;
+  if(wclist == NULL || word == NULL) return 1;
+
+  if((*wclist)->word == NULL){
+    (*wclist)->word = word;
+    return 0;
+  }
+
+  WordCount *wc = find_word(*wclist,word);
+  if(wc)
+    wc->count ++;
+  else{
+    wc = *wclist;
+    while(wc->next != NULL) wc = wc->next;
+    if(init_words(&(wc->next)))
+      return 1;
+    wc->next->word = word;
+  }
+  return 0;
 }
 
 void fprint_words(WordCount *wchead, FILE *ofile) {

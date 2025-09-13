@@ -25,33 +25,76 @@
 #endif
 
 #include "word_count.h"
+#include "debug.h"
 
 void init_words(word_count_list_t* wclist) { /* TODO */
+
+  ASSERT(wclist != NULL);
+  list_init (wclist);
 }
 
 size_t len_words(word_count_list_t* wclist) {
-  /* TODO */
-  return 0;
+  
+  ASSERT(wclist != NULL);
+  struct list_elem* e;
+  size_t wcount = 0;
+  //遍历
+  for (e = list_begin(wclist); e != list_end(wclist); e = list_next(e))
+  {
+    wcount += list_entry(e,struct word_count, elem)->count;
+  }
+  return wcount;
 }
 
 word_count_t* find_word(word_count_list_t* wclist, char* word) {
   /* TODO */
+  ASSERT(wclist != NULL);
+  struct list_elem* e;
+  //遍历
+  for (e = list_begin(wclist); e != list_end(wclist); e = list_next(e))
+  {
+    word_count_t* prt = list_entry(e,struct word_count, elem);
+    if(!strcmp(prt->word,word))
+      return prt;
+  }
   return NULL;
 }
 
 word_count_t* add_word(word_count_list_t* wclist, char* word) {
   /* TODO */
-  return NULL;
+
+  word_count_t* nw = find_word(wclist, word);
+  if(nw != NULL){
+    nw->count ++;
+    return nw;
+  } 
+
+  nw = (word_count_t*)malloc(sizeof(struct word_count));
+  nw->count = 1; nw->word = word; 
+  list_insert(list_tail(wclist),&nw->elem);
+  return nw;
 }
 
 void fprint_words(word_count_list_t* wclist, FILE* outfile) {
   /* TODO */
   /* Please follow this format: fprintf(<file>, "%i\t%s\n", <count>, <word>); */
+
+  ASSERT(wclist != NULL);
+  struct list_elem* e;
+  //遍历
+  for (e = list_begin(wclist); e != list_end(wclist); e = list_next(e)){
+    word_count_t* wc = list_entry(e,struct word_count, elem);
+    fprintf(outfile,"%i\t%s\n",wc->count,wc->word);
+  }
 }
 
 static bool less_list(const struct list_elem* ewc1, const struct list_elem* ewc2, void* aux) {
   /* TODO */
-  return false;
+
+  word_count_t* wc1 = list_entry(ewc1,struct word_count, elem);
+  word_count_t* wc2 = list_entry(ewc2,struct word_count, elem);
+  bool (*less)(const word_count_t*, const word_count_t*) = aux;
+  return less(wc1, wc2);
 }
 
 void wordcount_sort(word_count_list_t* wclist,

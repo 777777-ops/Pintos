@@ -9,6 +9,9 @@
 #define ROOT_DIR_SECTOR 1 /* Root directory file inode sector. */
 
 /* Block device that contains the file system. */
+
+//这里的extern：编译阶段相信该文件外有struct block的定义、以及fs_device的实现
+//在链接阶段会在其他文件中寻找struct block的定义
 extern struct block* fs_device;
 
 void filesys_init(bool format);

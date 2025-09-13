@@ -40,6 +40,16 @@ static bool page_from_pool(const struct pool*, void* page);
 
 /* Initializes the page allocator.  At most USER_PAGE_LIMIT
    pages are put into the user pool. */
+/*
+  这里有个细——————为什么使用uint8_t*解释free_start和free_end?
+      
+  1.明确：不管使用什么类型的指针解释这里ptov的void*指针，free_start的值都是一样的
+    !!!!弄清unit8_t*和unit8_t!!!!
+  2.如果是unit32_t*解释这个指针会发生什么？
+    unit32_t是4字节长度，unit32_t*指针在计算时，实际值是加n*4
+    例如unit32_t* a = 0x1000;  a = a + 1;
+    最终:   a == 0x1004 
+*/
 void palloc_init(size_t user_page_limit) {
   /* Free memory starts at 1 MB and runs to the end of RAM. */
   uint8_t* free_start = ptov(1024 * 1024);
@@ -62,6 +72,8 @@ void palloc_init(size_t user_page_limit) {
    then the pages are filled with zeros.  If too few pages are
    available, returns a null pointer, unless PAL_ASSERT is set in
    FLAGS, in which case the kernel panics. */
+/* 根据flags类型（0,1是内核，2是用户）决定是内核还是用户池分配page_cnt
+   个页。 */
 void* palloc_get_multiple(enum palloc_flags flags, size_t page_cnt) {
   struct pool* pool = flags & PAL_USER ? &user_pool : &kernel_pool;
   void* pages;
@@ -97,6 +109,7 @@ void* palloc_get_multiple(enum palloc_flags flags, size_t page_cnt) {
    then the page is filled with zeros.  If no pages are
    available, returns a null pointer, unless PAL_ASSERT is set in
    FLAGS, in which case the kernel panics. */
+/* 既可以分配内核内存池，也可以用户内存池 */
 void* palloc_get_page(enum palloc_flags flags) { return palloc_get_multiple(flags, 1); }
 
 /* Frees the PAGE_CNT pages starting at PAGES. */
@@ -130,6 +143,9 @@ void palloc_free_page(void* page) { palloc_free_multiple(page, 1); }
 
 /* Initializes pool P as starting at START and ending at END,
    naming it NAME for debugging purposes. */
+/* 初始化内存池，这里一般初始化内核池和用户池（两者对半开）。分配page_cnt个
+   页的大小，考虑到记录页状态的数据结构位图也需要空间，所以可使用空间只有
+   page_cnt - bm_pages个页的大小，并且调整该内存池的起始地址base */
 static void init_pool(struct pool* p, void* base, size_t page_cnt, const char* name) {
   /* We'll put the pool's used_map at its base.
      Calculate the space needed for the bitmap

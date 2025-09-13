@@ -78,7 +78,7 @@ static void start_process(void* file_name_) {
   bool success, pcb_success;
 
   /* Allocate process control block */
-  struct process* new_pcb = malloc(sizeof(struct process));
+  struct process* new_pcb = malloc(sizeof(struct process));   //这里的process在内核池
   success = pcb_success = new_pcb != NULL;
 
   /* Initialize process control block */
@@ -99,7 +99,7 @@ static void start_process(void* file_name_) {
     if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
     if_.cs = SEL_UCSEG;
     if_.eflags = FLAG_IF | FLAG_MBS;
-    success = load(file_name, &if_.eip, &if_.esp);
+    success = load(file_name, &if_.eip, &if_.esp);            //这里load可执行程序后的代码在用户池
   }
 
   /* Handle failure with succesful PCB malloc. Must free the PCB */
@@ -423,6 +423,11 @@ static bool validate_segment(const struct Elf32_Phdr* phdr, struct file* file) {
 
    Return true if successful, false if a memory allocation error
    or disk read error occurs. */
+
+/*  关注upage和kpage，这里由磁盘读入的file文件，被加载到了物理内存池，但
+   但由于palloc的特性，尽管kpage映射到了这块物理内存池，但是kpage是虚拟内核
+   地址用户进程仍然不可以访问，所以在install_page(upage, kpage, writable)中，
+   要将upage这个虚拟用户地址页映射到这块物理内存池，使得用户线程可以访问 */
 static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t read_bytes,
                          uint32_t zero_bytes, bool writable) {
   ASSERT((read_bytes + zero_bytes) % PGSIZE == 0);
@@ -472,8 +477,12 @@ static bool setup_stack(void** esp) {
   kpage = palloc_get_page(PAL_USER | PAL_ZERO);
   if (kpage != NULL) {
     success = install_page(((uint8_t*)PHYS_BASE) - PGSIZE, kpage, true);
-    if (success)
-      *esp = PHYS_BASE;
+    if (success){
+      int FREE_SETP = 12;         //这里FREE_SETP>=12 并且满足0-FREE_SETP-12 % 16 = 0
+      *esp = PHYS_BASE - 20;
+      *(uint32_t *)(*esp + 4) = 1;
+      
+    }
     else
       palloc_free_page(kpage);
   }

@@ -193,9 +193,9 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
 
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame(t, sizeof *kf);
-  kf->eip = NULL;
-  kf->function = function;
-  kf->aux = aux;
+  kf->eip = NULL;                //线程运行的起点
+  kf->function = function;       //线程运行的函数
+  kf->aux = aux;                 //传入函数的参数
 
   /* Stack frame for switch_entry(). */
   ef = alloc_frame(t, sizeof *ef);
@@ -205,6 +205,27 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
   sf = alloc_frame(t, sizeof *sf);
   sf->eip = switch_entry;
   sf->ebp = 0;
+
+  /*
+      一、switch_threads:
+        是每个线程的“门”，离开本线程时要保存寄存器状态,
+      进入本线程时要读取线程寄存器状态。
+
+      ---eip (跳转到下一个函数switch_entry的入口)
+      ---ebx
+      ---ebp
+      ---esi
+      ---edi
+
+      二、switch_entry:
+        这个函数模拟的结构体中只有一个参数
+      ---eip (跳转到kernel_thread()进入真正的本线程操作)
+
+        但该函数执行了一步关键操作----call thread_switch_tail
+        thread_switch_tail可以销毁已退出的线程，更新当前线程指针，
+      处理线程转化等工作
+        最后调用kernel_thread()进入真正的线程操作
+  */
 
   /* Add to run queue. */
   thread_unblock(t);
@@ -428,7 +449,9 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   strlcpy(t->name, name, sizeof t->name);
   t->stack = (uint8_t*)t + PGSIZE;
   t->priority = priority;
+#ifdef USERPROG
   t->pcb = NULL;
+#endif
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable();

@@ -21,7 +21,7 @@
 /* Sizes of loader data structures. */
 #define LOADER_SIG_LEN 2
 #define LOADER_PARTS_LEN 64
-#define LOADER_ARGS_LEN 128
+#define LOADER_ARGS_LEN 128                //加载器预留的命令行参数缓冲区大小
 #define LOADER_ARG_CNT_LEN 4
 
 /* GDT selectors defined by loader.

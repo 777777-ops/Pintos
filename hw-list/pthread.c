@@ -1,3 +1,4 @@
+
 /*
  * You may NOT modify this file. Any changes you make to this file will not
  * be used when grading your submission.
@@ -43,6 +44,7 @@ int main(int argc, char* argv[]) {
       printf("ERROR; return code from pthread_create() is %d\n", rc);
       exit(-1);
     }
+    
   }
 
   /* Last thing that main() should do */

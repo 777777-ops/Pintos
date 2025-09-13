@@ -41,6 +41,8 @@ static inline elem_type bit_mask(size_t bit_idx) { return (elem_type)1 << (bit_i
 static inline size_t elem_cnt(size_t bit_cnt) { return DIV_ROUND_UP(bit_cnt, ELEM_BITS); }
 
 /* Returns the number of bytes required for BIT_CNT bits. */
+
+/* elem只是一个计量单位，这里是unsigned long 32位操作系统下也是uint32_t*/
 static inline size_t byte_cnt(size_t bit_cnt) { return sizeof(elem_type) * elem_cnt(bit_cnt); }
 
 /* Returns a bit mask in which the bits actually used in the last
@@ -86,6 +88,9 @@ struct bitmap* bitmap_create_in_buf(size_t bit_cnt, void* block, size_t block_si
 
 /* Returns the number of bytes required to accomodate a bitmap
    with BIT_CNT bits (for use with bitmap_create_in_buf()). */
+
+/* 输入bit_cnt（比特个数，这里一比特代表一4KB页）返回该位图bitmap所需的字节数 
+  也就是所需要的物理空间*/
 size_t bitmap_buf_size(size_t bit_cnt) { return sizeof(struct bitmap) + byte_cnt(bit_cnt); }
 
 /* Destroys bitmap B, freeing its storage.

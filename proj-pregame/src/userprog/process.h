@@ -22,6 +22,7 @@ typedef void (*stub_fun)(pthread_fun, void*);
    PCB from the TCB. All TCBs in a process will have a pointer
    to the PCB, and the PCB will have a pointer to the main thread
    of the process, which is `special`. */
+/* PCB：进程控制块   TCB：线程控制块*/
 struct process {
   /* Owned by process.c. */
   uint32_t* pagedir;          /* Page directory. */

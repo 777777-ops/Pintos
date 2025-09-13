@@ -35,9 +35,53 @@
 /*
  * main - handle command line, spawning one thread per file.
  */
+ 
+word_count_list_t word_counts;
+
+
+char* splice(char* sr1, char sr2);
+
+void* threadfun(void* fileName) {
+  FILE *file = fopen((char*)fileName,"r");
+  int ch;
+  char *word = NULL;
+  while((ch = fgetc(file)) != EOF){
+    if(isalpha(ch)){
+      ch = tolower(ch);
+      word = splice(word,(char)ch);
+    }else{
+      if(word && strlen(word) > 1)
+        add_word(&word_counts,word);
+      word = NULL;
+    }
+  }
+  if(word && strlen(word) > 1)
+    add_word(&word_counts,word);
+
+
+  fclose(file);
+}
+
+//sr1必须是堆上静态分配的空间
+char* splice(char* sr1, char sr2){
+  char *result;
+  if(sr1 == NULL){
+    result = (char*)malloc(2*sizeof(char));
+    result[0] = sr2; 
+    result[1] = '\0';
+  }else{
+    size_t len = strlen(sr1);
+    result = realloc(sr1,(len + 1 + 1)*sizeof(char));
+    if(result == NULL) 
+      exit(-1);
+    result[len] = sr2;
+    result[len+1] = '\0';
+  }
+  return result;
+}
+
 int main(int argc, char* argv[]) {
   /* Create the empty data structure. */
-  word_count_list_t word_counts;
   init_words(&word_counts);
 
   if (argc <= 1) {
@@ -45,6 +89,21 @@ int main(int argc, char* argv[]) {
     count_words(&word_counts, stdin);
   } else {
     /* TODO */
+    int nthreads = argc - 1;
+    pthread_t threads[nthreads];
+    for (int t = 0; t < nthreads; t++) {
+      int rc = pthread_create(&threads[t], NULL, threadfun, (void*)argv[t+1]);
+      if (rc) {
+        printf("ERROR; return code from pthread_create() is %d\n", rc);
+        exit(-1);
+      }
+      
+       
+    }
+
+    for (int t = 0; t < nthreads; t++) {
+      pthread_join(threads[t], NULL);
+    }
   }
 
   /* Output final result of all threads' work. */

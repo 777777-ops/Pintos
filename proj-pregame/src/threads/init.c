@@ -132,8 +132,14 @@ int main(void) {
 
   printf("Boot complete.\n");
 
-  /* Run actions specified on kernel command line. */
-  run_actions(argv);
+  if (*argv != NULL) {
+    /* Run actions specified on kernel command line. */
+    run_actions (argv);
+  } else {
+    // TODO: no command line passed to kernel. Run interactively 
+    printf("关闭！\n");
+  }
+
 
   /* Finish up. */
   shutdown();
@@ -193,8 +199,8 @@ static char** read_command_line(void) {
   int argc;
   int i;
 
-  argc = *(uint32_t*)ptov(LOADER_ARG_CNT);
-  p = ptov(LOADER_ARGS);
+  argc = *(uint32_t*)ptov(LOADER_ARG_CNT);     //LOADER_ARG_CNT是内存中存储参数数量的位置
+  p = ptov(LOADER_ARGS);                       //LOADER_ARGS是命令行参数字符串的起始地址
   end = p + LOADER_ARGS_LEN;
   for (i = 0; i < argc; i++) {
     if (p >= end)

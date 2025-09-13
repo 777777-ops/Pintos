@@ -10,6 +10,9 @@ typedef int32_t off_t;
 
 /* Format specifier for printf(), e.g.:
    printf ("offset=%"PROTd"\n", offset); */
+
+//PRId32是有符号32位、 是C99标准中定义的格式说明符宏
+//PRIu32是无符号32位
 #define PROTd PRId32
 
 #endif /* filesys/off_t.h */
