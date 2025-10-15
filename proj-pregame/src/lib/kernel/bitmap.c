@@ -258,6 +258,7 @@ size_t bitmap_scan(const struct bitmap* b, size_t start, size_t cnt, bool value)
    If CNT is zero, returns 0.
    Bits are set atomically, but testing bits is not atomic with
    setting them. */
+/* 先扫描一片连续的空闲空间，再翻倒，如果找不到就返回错误码 */
 size_t bitmap_scan_and_flip(struct bitmap* b, size_t start, size_t cnt, bool value) {
   size_t idx = bitmap_scan(b, start, cnt, value);
   if (idx != BITMAP_ERROR)
@@ -295,3 +296,42 @@ bool bitmap_write(const struct bitmap* b, struct file* file) {
 
 /* Dumps the contents of B to the console as hexadecimal. */
 void bitmap_dump(const struct bitmap* b) { hex_dump(0, b->bits, byte_cnt(b->bit_cnt), false); }
+
+
+
+/* 在位图b中寻找最长的连续空间
+   value: 要查找的空间类型 (true=占用, false=空闲)
+   out_start: 输出参数，返回最长连续空间的起始位置
+   返回值: 最长连续空间的长度 */
+size_t bitmap_longest(struct bitmap *b, size_t *out_start, bool value) {
+    ASSERT(b != NULL);
+    ASSERT(out_start != NULL);
+    
+    size_t max_length = 0;
+    size_t current_length = 0;
+    size_t max_start = BITMAP_ERROR;
+    size_t current_start = BITMAP_ERROR;
+    
+    for (size_t i = 0; i < b->bit_cnt; i++) {
+        if (bitmap_test(b, i) == value) {
+            if (current_start == BITMAP_ERROR) {
+                current_start = i;
+                current_length = 1;
+            } else 
+                current_length++;
+              
+            /* 检查是否找到更长的连续块 */
+            if (current_length > max_length) {
+                max_length = current_length;
+                max_start = current_start;
+            }
+        } else {
+            /* 当前位不符合要求，重置当前连续块 */
+            current_start = BITMAP_ERROR;
+            current_length = 0;
+        }
+    }
+    
+    *out_start = max_start;
+    return max_length;
+}

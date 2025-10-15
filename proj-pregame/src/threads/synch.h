@@ -4,6 +4,9 @@
 #include <list.h>
 #include <stdbool.h>
 
+
+void synch_init(void);
+
 /* A counting semaphore. */
 struct semaphore {
   unsigned value;      /* Current value. */
@@ -51,6 +54,25 @@ struct rw_lock {
 void rw_lock_init(struct rw_lock*);
 void rw_lock_acquire(struct rw_lock*, bool reader);
 void rw_lock_release(struct rw_lock*, bool reader);
+
+/* 捐赠调度策略使用*/
+struct thread_priority{
+  struct list_elem elem;
+  struct thread* thread;
+  int old_priorities;
+  struct list locks;
+  struct lock* waiting;
+};
+
+struct lock_offer{
+  struct list_elem elem;
+  struct lock* lock;
+  int priority;
+};
+
+void create_thread_unit(struct thread* thread);
+struct thread_priority* thread_unit(struct thread* t);
+void re_priority_prio(struct thread_priority* t_p);
 
 /* Optimization barrier.
 

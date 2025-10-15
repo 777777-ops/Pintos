@@ -386,6 +386,21 @@ void list_insert_ordered(struct list* list, struct list_elem* elem, list_less_fu
   return list_insert(e, elem);
 }
 
+/* 和上面的函数一样，不过是!less，因为这里的队列元素prio从高到低排序 */
+void list_insert_ordered_down(struct list* list, struct list_elem* elem, list_less_func* less,
+                         void* aux) {
+  struct list_elem* e;
+
+  ASSERT(list != NULL);
+  ASSERT(elem != NULL);
+  ASSERT(less != NULL);
+
+  for (e = list_begin(list); e != list_end(list); e = list_next(e))
+    if (!less(elem, e, aux))     //elem > e
+      break;
+  return list_insert(e, elem);
+}
+
 /* Iterates through LIST and removes all but the first in each
    set of adjacent elements that are equal according to LESS
    given auxiliary data AUX.  If DUPLICATES is non-null, then the

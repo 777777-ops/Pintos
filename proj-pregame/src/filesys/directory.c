@@ -6,23 +6,10 @@
 #include "filesys/inode.h"
 #include "threads/malloc.h"
 
-/* A directory. */
-struct dir {
-  struct inode* inode; /* Backing store. */
-  off_t pos;           /* Current position. */
-};
-
-/* A single directory entry. */
-struct dir_entry {
-  block_sector_t inode_sector; /* Sector number of header. */
-  char name[NAME_MAX + 1];     /* Null terminated file name. */
-  bool in_use;                 /* In use or free? */
-};
-
 /* Creates a directory with space for ENTRY_CNT entries in the
    given SECTOR.  Returns true if successful, false on failure. */
-bool dir_create(block_sector_t sector, size_t entry_cnt) {
-  return inode_create(sector, entry_cnt * sizeof(struct dir_entry));
+bool dir_create(block_sector_t sector, size_t entry_cnt){
+  return inode_create(sector, entry_cnt * sizeof(struct dir_entry), true, true);
 }
 
 /* Opens and returns the directory for the given INODE, of which
@@ -49,6 +36,8 @@ struct dir* dir_open_root(void) {
 /* Opens and returns a new directory for the same inode as DIR.
    Returns a null pointer on failure. */
 struct dir* dir_reopen(struct dir* dir) {
+  if(dir == NULL)
+    return NULL;
   return dir_open(inode_reopen(dir->inode));
 }
 
@@ -91,7 +80,8 @@ static bool lookup(const struct dir* dir, const char* name, struct dir_entry* ep
 /* Searches DIR for a file with the given NAME
    and returns true if one exists, false otherwise.
    On success, sets *INODE to an inode for the file, otherwise to
-   a null pointer.  The caller must close *INODE. */
+   a null pointer.   !!  The caller must close *INODE. !! */
+/* 调用者要关闭inode */
 bool dir_lookup(const struct dir* dir, const char* name, struct inode** inode) {
   struct dir_entry e;
 
@@ -114,8 +104,9 @@ bool dir_lookup(const struct dir* dir, const char* name, struct inode** inode) {
    error occurs. */
 bool dir_add(struct dir* dir, const char* name, block_sector_t inode_sector) {
   struct dir_entry e;
-  off_t ofs;
+  off_t ofs ;
   bool success = false;
+  char zeros[sizeof e];
 
   ASSERT(dir != NULL);
   ASSERT(name != NULL);
@@ -135,15 +126,29 @@ bool dir_add(struct dir* dir, const char* name, block_sector_t inode_sector) {
      inode_read_at() will only return a short read at end of file.
      Otherwise, we'd need to verify that we didn't get a short
      read due to something intermittent such as low memory. */
-  for (ofs = 0; inode_read_at(dir->inode, &e, sizeof e, ofs) == sizeof e; ofs += sizeof e)
-    if (!e.in_use)
-      break;
+  /* 修改：如果目录空间不足，可添加新的扇区空间 */
+  ofs = 0;
+  memset(zeros, 0, sizeof e);
+  while(true){
+    if(inode_read_at(dir->inode, &e, sizeof e, ofs) == sizeof e){
+      if (!e.in_use)
+        break;
+    }
+    else{
+      inode_write_at(dir->inode, zeros, sizeof e, ofs);
+      continue;
+    }
+    ofs += sizeof e;
+  }
 
   /* Write slot. */
   e.in_use = true;
   strlcpy(e.name, name, sizeof e.name);
   e.inode_sector = inode_sector;
+  dir->inode->data->dir_entries ++;
   success = inode_write_at(dir->inode, &e, sizeof e, ofs) == sizeof e;
+  if(!success)
+    dir->inode->data->dir_entries --;
 
 done:
   return success;
@@ -170,6 +175,10 @@ bool dir_remove(struct dir* dir, const char* name) {
   if (inode == NULL)
     goto done;
 
+  /* 如果删除的是目录，且目录中仍有文件，无法删除 */
+  if(dir_is(inode) && inode->data->dir_entries > 2)
+    goto done;
+
   /* Erase directory entry. */
   e.in_use = false;
   if (inode_write_at(dir->inode, &e, sizeof e, ofs) != sizeof e)
@@ -178,6 +187,7 @@ bool dir_remove(struct dir* dir, const char* name) {
   /* Remove inode. */
   inode_remove(inode);
   success = true;
+  dir->inode->data->dir_entries --;
 
 done:
   inode_close(inode);
@@ -192,10 +202,41 @@ bool dir_readdir(struct dir* dir, char name[NAME_MAX + 1]) {
 
   while (inode_read_at(dir->inode, &e, sizeof e, dir->pos) == sizeof e) {
     dir->pos += sizeof e;
-    if (e.in_use) {
+    if (e.in_use && strcmp(e.name, ".") != 0 && strcmp(e.name, "..") != 0){
       strlcpy(name, e.name, NAME_MAX + 1);
       return true;
     }
   }
   return false;
+}
+
+/* 确定打开的INODE是否为目录 */
+inline bool dir_is(struct inode* inode){
+  ASSERT(inode != NULL);
+  return inode->data->is_dir;
+}
+
+/* 返回目录中的目录项个数  */
+size_t dir_entries(struct dir* dir){
+  ASSERT(dir != NULL);
+  ASSERT(dir->inode != NULL);
+  return dir->inode->data->dir_entries;
+}
+
+/* 打开目录文件 */
+struct dir* dir_open_file(struct file* file){
+  struct inode* inode = file_get_inode(file);
+  if(!dir_is(inode))
+    return NULL;
+
+  struct dir* dir;
+  dir = dir_open(inode_reopen(inode));
+  dir->pos = file->pos;
+  return dir;
+}
+
+/* 关闭目录文件 */
+void dir_close_file(struct dir* dir, struct file* file){
+  file->pos = dir->pos;
+  dir_close(dir);
 }

@@ -320,6 +320,12 @@ void intr_handler(struct intr_frame* frame) {
   bool external;
   intr_handler_func* handler;
 
+#ifdef USERPROG
+  /* 如果是用户中断就保存用户的esp */
+  if((frame->error_code & 0x4) != 0)
+    thread_current()->user_esp = frame->esp;
+#endif
+
   /* External interrupts are special.
      We only handle one at a time (so interrupts must be off)
      and they need to be acknowledged on the PIC (see below).
@@ -332,7 +338,6 @@ void intr_handler(struct intr_frame* frame) {
     in_external_intr = true;
     yield_on_return = false;
   }
-
   /* Invoke the interrupt's handler. */
   handler = intr_handlers[frame->vec_no];
   if (handler != NULL)

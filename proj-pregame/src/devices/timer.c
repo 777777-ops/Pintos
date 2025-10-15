@@ -3,10 +3,12 @@
 #include <inttypes.h>
 #include <round.h>
 #include <stdio.h>
+#include <lib/kernel/list.h>
 #include "devices/pit.h"
 #include "threads/interrupt.h"
 #include "threads/synch.h"
 #include "threads/thread.h"
+#include "threads/synch.h"
 
 /* See [8254] for hardware details of the 8254 timer chip. */
 
@@ -23,6 +25,7 @@ static int64_t ticks;
 /* Number of loops per timer tick.
    Initialized by timer_calibrate(). */
 static unsigned loops_per_tick;
+static struct sleep_list sleep_list;
 
 static intr_handler_func timer_interrupt;
 static bool too_many_loops(unsigned loops);
@@ -30,11 +33,24 @@ static void busy_wait(int64_t loops);
 static void real_time_sleep(int64_t num, int32_t denom);
 static void real_time_delay(int64_t num, int32_t denom);
 
+/* 睡眠函数 */
+static void sleep_list_into(int64_t wakeup_time);
+static void sleep_list_init(void);
+static void sleep_list_pop(void);
+
+
 /* Sets up the timer to interrupt TIMER_FREQ times per second,
    and registers the corresponding interrupt. */
 void timer_init(void) {
-  pit_configure_channel(0, 2, TIMER_FREQ);
-  intr_register_ext(0x20, timer_interrupt, "8254 Timer");
+  pit_configure_channel(0, 2, TIMER_FREQ);                           //TIMER_FREQ   一秒多少中断次数
+  intr_register_ext(0x20, timer_interrupt, "8254 Timer");            //注册时间中断
+  sleep_list_init();
+}
+
+/* 初始化休眠链表 */
+void sleep_list_init(void){
+  list_init(&sleep_list.thread_list);
+  list_init(&sleep_list.wakeup_list);
 }
 
 /* Calibrates loops_per_tick, used to implement brief delays. */
@@ -63,7 +79,7 @@ void timer_calibrate(void) {
 
 /* Returns the number of timer ticks since the OS booted. */
 int64_t timer_ticks(void) {
-  enum intr_level old_level = intr_disable();
+  enum intr_level old_level = intr_disable();  
   int64_t t = ticks;
   intr_set_level(old_level);
   return t;
@@ -73,15 +89,16 @@ int64_t timer_ticks(void) {
    should be a value once returned by timer_ticks(). */
 int64_t timer_elapsed(int64_t then) { return timer_ticks() - then; }
 
+
 /* Sleeps for approximately TICKS timer ticks.  Interrupts must
    be turned on. */
 void timer_sleep(int64_t ticks) {
-  int64_t start = timer_ticks();
 
+  int64_t start = timer_ticks();
   ASSERT(intr_get_level() == INTR_ON);
-  while (timer_elapsed(start) < ticks)
-    thread_yield();
+  sleep_list_into(start + ticks);
 }
+
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
    turned on. */
@@ -128,8 +145,23 @@ void timer_print_stats(void) { printf("Timer: %" PRId64 " ticks\n", timer_ticks(
 /* Timer interrupt handler. */
 static void timer_interrupt(struct intr_frame* args UNUSED) {
   ticks++;
-  thread_tick();
+  thread_tick();           /* 判断现在的线程是否需要切换、tick + 1、cur->recent_cpu + 1 */
+  sleep_list_pop();        //睡眠唤醒
+
+  if (active_sched_policy == SCHED_MLFQS){
+    if(ticks % TIMER_FREQ == 0){ 
+      load_avg_calc();         
+      recent_cpu_update();
+    }
+    if(ticks % 4 == 0){
+      mlfqs_priority_update();
+      intr_yield_on_return();
+    }
+    
+  }
 }
+
+
 
 /* Returns true if LOOPS iterations waits for more than one timer
    tick, otherwise false. */
@@ -189,4 +221,49 @@ static void real_time_delay(int64_t num, int32_t denom) {
      the possibility of overflow. */
   ASSERT(denom % 1000 == 0);
   busy_wait(loops_per_tick * num / 1000 * TIMER_FREQ / (denom / 1000));
+}
+
+
+
+/* 弹出第一个到达时间的线程 */
+static void sleep_list_pop(){
+  struct list_elem* thread_first;
+  struct list_elem* wakeup_first;
+  while(true){
+    thread_first = list_begin(&sleep_list.thread_list);
+    wakeup_first = list_begin(&sleep_list.wakeup_list);
+    if(thread_first == list_end(&sleep_list.thread_list) || wakeup_first == list_end(&sleep_list.wakeup_list))
+      return;
+    if(list_entry(wakeup_first,struct wakeup,elem)->wakeup_time <= ticks){
+      list_pop_front(&sleep_list.thread_list);
+      list_pop_front(&sleep_list.wakeup_list);
+      thread_unblock(list_entry(thread_first,struct thread,elem));
+    }else
+      return;
+  }
+}
+
+
+/* 队列头是wakeup_time苏醒时间最小的线程*/
+static void sleep_list_into(int64_t wakeup_time){
+  enum intr_level old_level;
+  struct list_elem* e1,*e2;
+  struct thread* cur = thread_current();
+  struct wakeup new_e;
+  new_e.wakeup_time = wakeup_time;
+
+  old_level = intr_disable();  //关闭中断
+  //找到new_e合适的插入位置
+  for (e1 = list_begin(&sleep_list.thread_list),e2 = list_begin(&sleep_list.wakeup_list);
+    e1 != list_end(&sleep_list.thread_list) && e2 != list_end(&sleep_list.wakeup_list);
+    e1 = list_next(e1), e2 = list_next(e2)
+  ){
+    if(list_entry(e2,struct wakeup,elem)->wakeup_time > wakeup_time) break;
+  }
+
+  list_insert(e1,&cur->elem);
+  list_insert(e2,&new_e.elem);
+
+  thread_block();            
+  intr_set_level(old_level);
 }

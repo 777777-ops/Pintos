@@ -10,7 +10,11 @@
 #include "threads/loader.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
-
+#ifdef VM
+#include "vm/frame.h"
+#include "vm/page.h"
+#include "vm/swap.h"
+#endif
 /* Page allocator.  Hands out memory in page-size (or
    page-multiple) chunks.  See malloc.h for an allocator that
    hands out smaller chunks.
@@ -64,6 +68,20 @@ void palloc_init(size_t user_page_limit) {
   /* Give half of memory to kernel, half to user. */
   init_pool(&kernel_pool, free_start, kernel_pages, "kernel pool");
   init_pool(&user_pool, free_start + kernel_pages * PGSIZE, user_pages, "user pool");
+
+#ifdef VM
+  frame_table_init(user_pages);
+  uint8_t* i = free_start;
+  for(; i < kernel_pool.base; i += PGSIZE)
+    frame_create(i, true);
+
+  i = free_start + kernel_pages * PGSIZE;
+  extern size_t ker_user_line;
+  for(; i < user_pool.base; i += PGSIZE){
+    frame_create(i, true);
+    ker_user_line ++;
+  }
+#endif
 }
 
 /* Obtains and returns a group of PAGE_CNT contiguous free pages.
@@ -86,10 +104,30 @@ void* palloc_get_multiple(enum palloc_flags flags, size_t page_cnt) {
   page_idx = bitmap_scan_and_flip(pool->used_map, 0, page_cnt, false);
   lock_release(&pool->lock);
 
+  /* 下面进行修改 */
+#ifdef VM
+
+  bool is_kernel = !(flags & PAL_USER);
+  if (page_idx != BITMAP_ERROR){
+    pages = pool->base + PGSIZE * page_idx;
+    for(size_t i = 0; i < page_cnt; i++)
+      frame_create(pages + i * PGSIZE, is_kernel);
+  }
+  else if(!is_kernel){
+    pages = frame_full_get(page_cnt);
+    for(size_t i = 0; i < page_cnt; i++)
+      frame_create(pages + i * PGSIZE, is_kernel);
+  }else
+    pages = NULL;
+#else
+
   if (page_idx != BITMAP_ERROR)
     pages = pool->base + PGSIZE * page_idx;
   else
     pages = NULL;
+
+#endif
+
 
   if (pages != NULL) {
     if (flags & PAL_ZERO)
@@ -136,6 +174,11 @@ void palloc_free_multiple(void* pages, size_t page_cnt) {
 
   ASSERT(bitmap_all(pool->used_map, page_idx, page_cnt));
   bitmap_set_multiple(pool->used_map, page_idx, page_cnt, false);
+
+#ifdef VM
+  for(size_t i = 0; i < page_cnt; i++)
+    frame_clean(pages + i * PGSIZE);
+#endif
 }
 
 /* Frees the page at PAGE. */

@@ -20,13 +20,22 @@
    of thread.h for details. */
 #define THREAD_MAGIC 0xcd6abf4b
 
+/* 优先级调度————捐赠策略 */
+extern struct list priorities_list;
+
+/* 优先级调度————MLFQS策略 */
+struct list ready_lists_mlfqs[64];
+
+/* LOAG_AVG————MLFQS策略*/
+fixed_point_t load_avg;
+
 /* List of processes in THREAD_READY state, that is, processes
    that are ready to run but not actually running. */
-static struct list fifo_ready_list;
+struct list ready_list;
 
 /* List of all processes.  Processes are added to this list
    when they are first scheduled and removed when they exit. */
-static struct list all_list;
+struct list all_list;
 
 /* Idle thread. */
 static struct thread* idle_thread;
@@ -107,14 +116,26 @@ void thread_init(void) {
   ASSERT(intr_get_level() == INTR_OFF);
 
   lock_init(&tid_lock);
-  list_init(&fifo_ready_list);
+  list_init(&ready_list);  /* 在MLFQS策略中理应被删除，但害怕有bug */
   list_init(&all_list);
+    /* 初始化专属列表 */
+  if(active_sched_policy == SCHED_PRIO)
+    list_init(&priorities_list);
+  else if(active_sched_policy == SCHED_MLFQS){
+    for(int i = 0; i < 64; i++)
+      list_init(&ready_lists_mlfqs[i]);
+    load_avg = fix_int(0);  
+  }
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread();
   init_thread(initial_thread, "main", PRI_DEFAULT);
+  initial_thread->niceness = NIC_DEFAULT;
+  initial_thread->recent_cpu = fix_int(0);
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid();
+
+
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -137,6 +158,9 @@ void thread_start(void) {
 void thread_tick(void) {
   struct thread* t = thread_current();
 
+  /* 当前运行线程加一 */
+  recent_cpu_add(t);
+
   /* Update statistics. */
   if (t == idle_thread)
     idle_ticks++;
@@ -147,9 +171,12 @@ void thread_tick(void) {
   else
     kernel_ticks++;
 
-  /* Enforce preemption. */
-  if (++thread_ticks >= TIME_SLICE)
-    intr_yield_on_return();
+  if (active_sched_policy == SCHED_MLFQS){}
+  else{
+    /* Enforce preemption. */
+    if (++thread_ticks >= TIME_SLICE)
+      intr_yield_on_return();
+  }
 }
 
 /* Prints thread statistics. */
@@ -191,6 +218,14 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
   init_thread(t, name, priority);
   tid = t->tid = allocate_tid();
 
+#ifdef USERPROG
+  if(!process_init(t)){ 
+    list_remove(&t->allelem);
+    palloc_free_page(t);
+    return TID_ERROR;
+  }
+#endif
+
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame(t, sizeof *kf);
   kf->eip = NULL;                //线程运行的起点
@@ -205,31 +240,12 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
   sf = alloc_frame(t, sizeof *sf);
   sf->eip = switch_entry;
   sf->ebp = 0;
-
-  /*
-      一、switch_threads:
-        是每个线程的“门”，离开本线程时要保存寄存器状态,
-      进入本线程时要读取线程寄存器状态。
-
-      ---eip (跳转到下一个函数switch_entry的入口)
-      ---ebx
-      ---ebp
-      ---esi
-      ---edi
-
-      二、switch_entry:
-        这个函数模拟的结构体中只有一个参数
-      ---eip (跳转到kernel_thread()进入真正的本线程操作)
-
-        但该函数执行了一步关键操作----call thread_switch_tail
-        thread_switch_tail可以销毁已退出的线程，更新当前线程指针，
-      处理线程转化等工作
-        最后调用kernel_thread()进入真正的线程操作
-  */
-
   /* Add to run queue. */
   thread_unblock(t);
 
+  /* 如果当前优先级低，要立马yield */
+  if(thread_current()->priority < t->priority)
+    thread_yield();
   return tid;
 }
 
@@ -256,9 +272,18 @@ static void thread_enqueue(struct thread* t) {
   ASSERT(is_thread(t));
 
   if (active_sched_policy == SCHED_FIFO)
-    list_push_back(&fifo_ready_list, &t->elem);
+    list_push_back(&ready_list, &t->elem);
+  else if (active_sched_policy == SCHED_PRIO)
+    list_insert_ordered_down(&ready_list, &t->elem, pri_comparator, NULL);
+  else if (active_sched_policy == SCHED_MLFQS)
+    list_push_back(&ready_lists_mlfqs[t->priority], &t->elem);
   else
     PANIC("Unimplemented scheduling policy value: %d", active_sched_policy);
+}
+
+/* A <= B时 返回true */
+bool pri_comparator(const struct list_elem* a, const struct list_elem* b, void* aux UNUSED){
+  return list_entry(a, struct thread, elem)->priority <= list_entry(b, struct thread, elem)->priority;
 }
 
 /* Transitions a blocked thread T to the ready-to-run state.
@@ -348,32 +373,87 @@ void thread_foreach(thread_action_func* func, void* aux) {
   }
 }
 
+/* 如果当前priority不是最大的就yield */
+void thread_try_yield(){  
+  struct list_elem *alle;
+  struct thread *t;
+  int max = -1;
+
+  if (active_sched_policy == SCHED_PRIO){
+    if(list_empty(&ready_list))
+      return;
+    if(list_entry(list_begin(&ready_list), struct thread, elem)->priority > thread_current()->priority)
+      thread_yield();
+  }else{
+
+    for (alle = list_begin(&all_list); alle != list_end(&all_list); alle = list_next(alle)) {
+      t = list_entry(alle, struct thread, allelem);
+      if(t->priority > max && t->status == THREAD_READY){
+        max = t->priority;
+      }
+    }
+
+    if(max > thread_current()->priority)
+      thread_yield();
+  }
+
+
+}
+
 /* Sets the current thread's priority to NEW_PRIORITY. */
-void thread_set_priority(int new_priority) { thread_current()->priority = new_priority; }
+/* 断言非中断上下文，这里会涉及线程yield */
+void thread_set_priority(int new_priority) {
+  if(new_priority < PRI_MIN || new_priority > PRI_MAX ){
+    PANIC("ERROR PRIORITY");
+  }
+  ASSERT(!intr_context());
+
+  struct thread* cur = thread_current();
+
+  if(active_sched_policy == SCHED_PRIO){
+    struct thread_priority *t_p = thread_unit(cur);
+    t_p->old_priorities = new_priority;
+    re_priority_prio(t_p); 
+  }else if(active_sched_policy == SCHED_MLFQS)
+    thread_yield();
+  else{
+    cur->priority = new_priority;
+  }
+}
 
 /* Returns the current thread's priority. */
 int thread_get_priority(void) { return thread_current()->priority; }
 
 /* Sets the current thread's nice value to NICE. */
-void thread_set_nice(int nice UNUSED) { /* Not yet implemented. */
+void thread_set_nice(int nice UNUSED) { 
+  if(nice < NIC_MIN|| nice > NIC_MAX ){
+    PANIC("ERROR NICENESS");
+  }
+
+  struct thread* cur = thread_current();
+  if(active_sched_policy == SCHED_MLFQS){
+    cur->niceness = nice;
+    mlfqs_priority_calc(cur);
+    thread_yield();
+  }
 }
 
 /* Returns the current thread's nice value. */
 int thread_get_nice(void) {
   /* Not yet implemented. */
-  return 0;
+  return thread_current()->niceness;
 }
 
 /* Returns 100 times the system load average. */
 int thread_get_load_avg(void) {
-  /* Not yet implemented. */
-  return 0;
+  return fix_round(fix_scale(load_avg, 100));
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
 int thread_get_recent_cpu(void) {
-  /* Not yet implemented. */
-  return 0;
+  struct thread *t = thread_current();
+  int a = fix_round(fix_scale(t->recent_cpu, 100));
+  return a;
 }
 
 /* Idle thread.  Executes when no other thread is ready to run.
@@ -451,11 +531,27 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   t->priority = priority;
 #ifdef USERPROG
   t->pcb = NULL;
+  t->user_esp = 0;
 #endif
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable();
   list_push_back(&all_list, &t->allelem);
+
+
+
+  /* 捐赠策略要新建线程单元，MLFQS策略要计算优先级 */
+  if( t != initial_thread &&  strcmp(name, "idle") != 0 ){
+    if(active_sched_policy == SCHED_PRIO){
+      create_thread_unit(t);
+    }else if(active_sched_policy == SCHED_MLFQS){
+      t->niceness = thread_current()->niceness;  /* 继承 */
+      t->recent_cpu = thread_current()->recent_cpu;
+      mlfqs_priority_calc(t);
+    }
+    
+  }
+
   intr_set_level(old_level);
 }
 
@@ -472,15 +568,19 @@ static void* alloc_frame(struct thread* t, size_t size) {
 
 /* First-in first-out scheduler */
 static struct thread* thread_schedule_fifo(void) {
-  if (!list_empty(&fifo_ready_list))
-    return list_entry(list_pop_front(&fifo_ready_list), struct thread, elem);
+  if (!list_empty(&ready_list))
+    return list_entry(list_pop_front(&ready_list), struct thread, elem);
   else
     return idle_thread;
 }
 
-/* Strict priority scheduler */
+/* Strict priority scheduler 
+   弹出下一个执行的线程-------和fifo一样*/
 static struct thread* thread_schedule_prio(void) {
-  PANIC("Unimplemented scheduler policy: \"-sched=prio\"");
+  if (!list_empty(&ready_list))
+    return list_entry(list_pop_front(&ready_list), struct thread, elem);
+  else
+    return idle_thread;
 }
 
 /* Fair priority scheduler */
@@ -488,9 +588,13 @@ static struct thread* thread_schedule_fair(void) {
   PANIC("Unimplemented scheduler policy: \"-sched=fair\"");
 }
 
-/* Multi-level feedback queue scheduler */
+/* Multi-level feedback queue scheduler */   
 static struct thread* thread_schedule_mlfqs(void) {
-  PANIC("Unimplemented scheduler policy: \"-sched=mlfqs\"");
+  for(int i = 63; i >= 0; i--){
+    if(!list_empty(&ready_lists_mlfqs[i]))
+      return list_entry(list_pop_front(&ready_lists_mlfqs[i]), struct thread, elem);
+  }
+  return idle_thread;
 }
 
 /* Not an actual scheduling policy — placeholder for empty
@@ -558,6 +662,7 @@ void thread_switch_tail(struct thread* prev) {
 
    It's not safe to call printf() until thread_switch_tail()
    has completed. */
+/* 调度的时候必须关中断 */
 static void schedule(void) {
   struct thread* cur = running_thread();
   struct thread* next = next_thread_to_run();
@@ -587,3 +692,113 @@ static tid_t allocate_tid(void) {
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof(struct thread, stack);
+
+
+/* MLFQS状态计算实现 */
+
+/* 重新计算最近cpu使用频率 */
+void recent_cpu_calc(struct thread* t){
+  ASSERT(intr_get_level() == INTR_OFF);
+  ASSERT(is_thread(t));
+
+  fixed_point_t old = t->recent_cpu;
+  fixed_point_t a = fix_scale(load_avg,2);
+  fixed_point_t coefficient = fix_div(a,fix_add(a,fix_int(1)));
+  t->recent_cpu = fix_add(fix_mul(coefficient, old),fix_int(t->niceness));
+}
+
+/* recent_cpu 加一  idle线程就直接返回 */
+void recent_cpu_add(struct thread* t){
+  ASSERT(intr_get_level() == INTR_OFF);
+  ASSERT(is_thread(t));
+
+  if(t == idle_thread ) return;
+  t->recent_cpu = fix_add(t->recent_cpu, fix_int(1));
+}
+
+/* 更新所有线程的recent_cpu */
+void recent_cpu_update(){
+  ASSERT(intr_get_level() == INTR_OFF);
+
+  struct list_elem* e;
+  for(e = list_begin(&all_list); e != list_end(&all_list); e = list_next(e)){
+    struct thread *t = list_entry(e, struct thread, allelem);
+    if(t != idle_thread  && strcmp(t->name, "idle") != 0 )
+      recent_cpu_calc(t);
+  }
+}
+
+
+
+/* 当前运行和就绪的线程的数量（除了idle线程）*/
+static int ready_threads(void){
+  ASSERT(intr_get_level() == INTR_OFF)
+
+  struct list_elem* e;
+  int sum = 0;
+  struct thread *t;
+  enum thread_status status;
+
+  for(e = list_begin(&all_list); e != list_end(&all_list); e = list_next(e)){
+    t = list_entry(e, struct thread, allelem);
+    status = t->status;
+    if((status == THREAD_RUNNING || status == THREAD_READY )&& t != idle_thread)
+      sum++;
+  }
+  return sum;
+}
+
+/* 重新计算load_avg——MLFQS */
+void load_avg_calc(){
+  ASSERT(intr_get_level() == INTR_OFF);
+
+   fixed_point_t a1 = fix_mul(fix_unscale(fix_int(59),60), load_avg);
+   fixed_point_t a2 = fix_scale(fix_unscale(fix_int(1),60), ready_threads());
+
+   load_avg = fix_add(a1, a2);
+   
+}
+
+
+
+
+/* 重新计算优先级——MLFQS (这里关中断一下) */
+void mlfqs_priority_calc(struct thread* t){
+  ASSERT(is_thread(t));
+  ASSERT(t != idle_thread);
+  
+  int priority;
+  fixed_point_t a;
+  enum intr_level old_level;
+
+  old_level = intr_disable();
+  a = fix_sub(fix_int(PRI_MAX), fix_unscale(t->recent_cpu, 4));
+
+  priority = fix_trunc(fix_sub(a, fix_int(2 * t->niceness)));
+  
+  priority = priority > 63 ? 63:priority;
+  priority = priority < 0 ? 0:priority;
+  t->priority = priority;
+  intr_set_level(old_level);
+}
+
+/* 更新所有线程列表ready_lists_mlfqs的分布格局 */
+void mlfqs_priority_update(){
+  ASSERT(intr_get_level() == INTR_OFF);
+
+  struct list_elem* alle;
+  struct list_elem* e;
+  struct thread *t;
+  for(alle = list_begin(&all_list); alle != list_end(&all_list); alle = list_next(alle)){
+    t = list_entry(alle, struct thread, allelem);
+    e = &t->elem;
+    if(t != idle_thread && strcmp(t->name, "idle") != 0){
+      mlfqs_priority_calc(t);
+      
+      if(t->status == THREAD_READY){
+        list_remove(e);
+        list_push_front(&ready_lists_mlfqs[t->priority], e);    
+      }
+    }
+  }
+}

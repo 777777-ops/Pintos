@@ -1,6 +1,7 @@
 #include "filesys/free-map.h"
 #include <bitmap.h>
 #include <debug.h>
+#include "threads/malloc.h"
 #include "filesys/file.h"
 #include "filesys/filesys.h"
 #include "filesys/inode.h"
@@ -56,7 +57,7 @@ void free_map_close(void) { file_close(free_map_file); }
    it. */
 void free_map_create(void) {
   /* Create inode. */
-  if (!inode_create(FREE_MAP_SECTOR, bitmap_file_size(free_map)))
+  if (!inode_create(FREE_MAP_SECTOR, bitmap_file_size(free_map), true, false))
     PANIC("free map creation failed");
 
   /* Write bitmap to file. */
@@ -65,4 +66,25 @@ void free_map_create(void) {
     PANIC("can't open free map");
   if (!bitmap_write(free_map, free_map_file))
     PANIC("can't write free map");
+}
+
+
+
+/* 在free-map中找到最长的连续空间，返回该连续空间的长度、起始位置 */
+size_t free_map_allocate_longest(block_sector_t* sectorp) {
+  block_sector_t sector;
+  size_t sectors = bitmap_longest(free_map, &sector, false);
+  if(sector == BITMAP_ERROR)
+    return 0;
+
+  bitmap_set_multiple(free_map, sector, sectors, true);
+  /* 写入文件失败后要回滚 */
+  if (free_map_file != NULL && !bitmap_write(free_map, free_map_file)){
+    bitmap_set_multiple(free_map, sector, sectors, false);
+    sector = BITMAP_ERROR;
+    return 0;
+  }
+
+  *sectorp = sector;   
+  return sectors;
 }

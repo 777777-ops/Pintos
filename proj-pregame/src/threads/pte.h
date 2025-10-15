@@ -59,6 +59,7 @@ static inline uintptr_t pd_no(const void* va) { return (uintptr_t)va >> PDSHIFT;
 #define PTE_AVL 0x00000e00   /* Bits available for OS use. */
 #define PTE_P 0x1            /* 1=present, 0=not present. */
 #define PTE_W 0x2            /* 1=read/write, 0=read-only. */
+#define PTE_LAZY 0x2         /* 1=赖加载（交换分区）, 0=相反*/
 #define PTE_U 0x4            /* 1=user/kernel, 0=kernel only. */
 #define PTE_A 0x20           /* 1=accessed, 0=not acccessed. */
 #define PTE_D 0x40           /* 1=dirty, 0=not dirty (PTEs only). */
@@ -72,8 +73,10 @@ static inline uint32_t pde_create(uint32_t* pt) {
 /* Returns a pointer to the page table that page directory entry
    PDE, which must "present", points to. */
 static inline uint32_t* pde_get_pt(uint32_t pde) {
-  ASSERT(pde & PTE_P);
-  return ptov(pde & PTE_ADDR);
+  if(pde & PTE_P)
+   return ptov(pde & PTE_ADDR);
+  else
+   PANIC(" EEE ");
 }
 
 /* Returns a PTE that points to PAGE.

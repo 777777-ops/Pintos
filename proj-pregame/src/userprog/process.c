@@ -19,17 +19,29 @@
 #include "threads/synch.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#ifdef VM
+#include "vm/frame.h"
+#endif
 
-static struct semaphore temporary;
+extern struct list all_list;
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
-static bool load(const char* file_name, void (**eip)(void), void** esp);
+static bool load(const char* comd, void (**eip)(void), void** esp);
 bool setup_thread(void (**eip)(void), void** esp);
+
+static struct process* process_get_parent(struct process* c);
+static struct child_info* process_get_child(struct process* p, pid_t cpid);
+static void process_free(struct process* p);
+
+static int fd_tb_offer(void);
+static void fd_tb_init(struct process* pcb);
+static void process_close_file(struct process* pcb, struct file* file);
 
 /* Initializes user programs in the system by ensuring the main
    thread has a minimal PCB so that it can execute and wait for
    the first user process. Any additions to the PCB should be also
    initialized here if main needs those members */
+/* main线程的初始化 */
 void userprog_init(void) {
   struct thread* t = thread_current();
   bool success;
@@ -42,44 +54,27 @@ void userprog_init(void) {
   t->pcb = calloc(sizeof(struct process), 1);
   success = t->pcb != NULL;
 
+  if(success){
+    //t->pcb->pagedir = init_page_dir;
+    t->pcb->pagedir = init_page_dir;
+    t->pcb->main_thread = thread_current();
+    t->pcb->parent = 0;
+    t->pcb->waiting = 0;
+    strlcpy(t->pcb->process_name, t->name, sizeof t->name);
+    sema_init(&t->pcb->sema,0);
+    list_init(&t->pcb->children);
+  }   
+
   /* Kill the kernel if we did not succeed */
   ASSERT(success);
 }
 
-/* Starts a new thread running a user program loaded from
-   FILENAME.  The new thread may be scheduled (and may even exit)
-   before process_execute() returns.  Returns the new process's
-   process id, or TID_ERROR if the thread cannot be created. */
-pid_t process_execute(const char* file_name) {
-  char* fn_copy;
-  tid_t tid;
-
-  sema_init(&temporary, 0);
-  /* Make a copy of FILE_NAME.
-     Otherwise there's a race between the caller and load(). */
-  fn_copy = palloc_get_page(0);
-  if (fn_copy == NULL)
-    return TID_ERROR;
-  strlcpy(fn_copy, file_name, PGSIZE);
-
-  /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create(file_name, PRI_DEFAULT, start_process, fn_copy);
-  if (tid == TID_ERROR)
-    palloc_free_page(fn_copy);
-  return tid;
-}
-
-/* A thread function that loads a user process and starts it
-   running. */
-static void start_process(void* file_name_) {
-  char* file_name = (char*)file_name_;
-  struct thread* t = thread_current();
-  struct intr_frame if_;
-  bool success, pcb_success;
-
+/* 初始化线程的pcb  这里的T是子进程*/
+bool process_init(struct thread *t){
   /* Allocate process control block */
-  struct process* new_pcb = malloc(sizeof(struct process));   //这里的process在内核池
-  success = pcb_success = new_pcb != NULL;
+  struct process* new_pcb = calloc(sizeof(struct process), 1);;   //这里的process在内核池
+  bool success = new_pcb != NULL;
+  struct process *p = thread_current()->pcb;
 
   /* Initialize process control block */
   if (success) {
@@ -87,46 +82,118 @@ static void start_process(void* file_name_) {
     // does not try to activate our uninitialized pagedir
     new_pcb->pagedir = NULL;
     t->pcb = new_pcb;
-
     // Continue initializing the PCB as normal
     t->pcb->main_thread = t;
     strlcpy(t->pcb->process_name, t->name, sizeof t->name);
+
+    list_init(&t->pcb->children);          
+    sema_init(&t->pcb->sema, 0);
+    t->pcb->parent = get_pid(p);
+    t->pcb->waiting = 0;
+    fd_tb_init(t->pcb);
+    if(p->dir)
+      t->pcb->dir = dir_reopen(p->dir);
+#ifdef VM
+    t->pcb->pt.pages = malloc(PGSIZE);
+    t->pcb->pt.pages_size = PGSIZE;
+    t->pcb->mmap_list = calloc(sizeof(struct mmap), 10);
+    t->pcb->mmap_len = 0;
+#endif
+    success = child_add(p, t->pcb);
+    if(!success){
+      free(t->pcb);
+      t->pcb = NULL;
+    }
   }
+
+
+  return success;
+}
+
+/* 从指令中挖出第一个单词作为file_name */
+static char* file_name_c(const char* comd){
+  int i = 0;
+  char *file_name;
+  // 查找第一个空格或字符串结尾
+  while(comd[i] != ' ' && comd[i] != '\0') {
+      i++;
+  }
+
+  file_name = (char*)malloc(i + 1);
+  if(file_name == NULL) return NULL;
+
+  memcpy(file_name, comd, i);
+  file_name[i] = '\0';
+  return file_name;
+}
+/* Starts a new thread running a user program loaded from
+   FILENAME.  The new thread may be scheduled (and may even exit)
+   before process_execute() returns.  Returns the new process's
+   process id, or TID_ERROR if the thread cannot be created. */
+pid_t process_execute(const char* comd) {
+  char* fn_copy;
+  tid_t tid;
+  char* file_name = file_name_c(comd);
+
+  /* Make a copy of COMD.
+     Otherwise there's a race between the caller and load(). */
+  fn_copy = palloc_get_page(0);
+  if (fn_copy == NULL)
+    return TID_ERROR;
+  strlcpy(fn_copy, comd, PGSIZE);
+ 
+  /* 查看文件是否存在  这一步目前仅是为了过测试 */
+  struct file* file = filesys_open(NULL, file_name);
+  if(file == NULL)
+    return -1;
+  free(file);
+
+  /* Create a new thread to execute FILE_NAME. */
+  tid = thread_create(file_name, PRI_DEFAULT, start_process, fn_copy);
+  if (tid == TID_ERROR)
+    palloc_free_page(fn_copy);
+  //  ？
+
+
+  free(file_name);
+  return tid;
+}
+
+/* A thread function that loads a user process and starts it
+   running. */
+static void start_process(void* file_name_) {
+  char* file_name = (char*)file_name_;
+  struct intr_frame if_;
+  bool success;
+
 
   /* Initialize interrupt frame and load executable. */
-  if (success) {
-    memset(&if_, 0, sizeof if_);
-    if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
-    if_.cs = SEL_UCSEG;
-    if_.eflags = FLAG_IF | FLAG_MBS;
-    success = load(file_name, &if_.eip, &if_.esp);            //这里load可执行程序后的代码在用户池
-  }
+  memset(&if_, 0, sizeof if_);
+  if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
+  if_.cs = SEL_UCSEG;
+  if_.eflags = FLAG_IF | FLAG_MBS;
+  success = load(file_name, &if_.eip, &if_.esp);            //这里load可执行程序后的代码在用户池
+
 
   /* Handle failure with succesful PCB malloc. Must free the PCB */
-  if (!success && pcb_success) {
+  if (!success) {
     // Avoid race where PCB is freed before t->pcb is set to NULL
     // If this happens, then an unfortuantely timed timer interrupt
     // can try to activate the pagedir, but it is now freed memory
-    struct process* pcb_to_free = t->pcb;
-    t->pcb = NULL;
-    free(pcb_to_free);
+    palloc_free_page(file_name);
+    process_exit(-2);
+  }else{
+    palloc_free_page(file_name);
+    /* Start the user process by simulating a return from an
+      interrupt, implemented by intr_exit (in
+      threads/intr-stubs.S).  Because intr_exit takes all of its
+      arguments on the stack in the form of a `struct intr_frame',
+      we just point the stack pointer (%esp) to our stack frame
+      and jump to it. */
+    asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&if_) : "memory");
+    NOT_REACHED();
   }
 
-  /* Clean up. Exit on failure or jump to userspace */
-  palloc_free_page(file_name);
-  if (!success) {
-    sema_up(&temporary);
-    thread_exit();
-  }
-
-  /* Start the user process by simulating a return from an
-     interrupt, implemented by intr_exit (in
-     threads/intr-stubs.S).  Because intr_exit takes all of its
-     arguments on the stack in the form of a `struct intr_frame',
-     we just point the stack pointer (%esp) to our stack frame
-     and jump to it. */
-  asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&if_) : "memory");
-  NOT_REACHED();
 }
 
 /* Waits for process with PID child_pid to die and returns its exit status.
@@ -138,13 +205,37 @@ static void start_process(void* file_name_) {
 
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
-int process_wait(pid_t child_pid UNUSED) {
-  sema_down(&temporary);
-  return 0;
+int process_wait(pid_t child_pid) {
+  struct thread* cur = thread_current();
+  struct process* p = cur->pcb;
+  struct child_info* ci = process_get_child(p, child_pid);
+  if(ci == NULL) return -1;
+  
+
+  enum intr_level old_level = intr_disable();
+  if(!ci->dead){
+    /* 还没dead */
+    p->waiting = child_pid;
+    sema_down(&p->sema);
+    intr_set_level(old_level);
+  }
+  intr_set_level(old_level);
+
+  p->waiting = 0;
+  int status = ci->status;
+  list_remove(&ci->elem);
+  free(ci);
+  return status;
+}
+
+/* 错误退出 */
+void process_error_exit(){
+  printf("%s: exit(%d)\n", thread_current()->pcb->process_name, -1);
+  process_exit(-1);
 }
 
 /* Free the current process's resources. */
-void process_exit(void) {
+void process_exit(int32_t status) {
   struct thread* cur = thread_current();
   uint32_t* pd;
 
@@ -154,8 +245,10 @@ void process_exit(void) {
     NOT_REACHED();
   }
 
+
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
+  /* 这里就重置页目录，要确保重置后的操作不会访问用户空间 */
   pd = cur->pcb->pagedir;
   if (pd != NULL) {
     /* Correct ordering here is crucial.  We must set
@@ -170,15 +263,36 @@ void process_exit(void) {
     pagedir_destroy(pd);
   }
 
-  /* Free the PCB of this process and kill this thread
-     Avoid race where PCB is freed before t->pcb is set to NULL
-     If this happens, then an unfortuantely timed timer interrupt
-     can try to activate the pagedir, but it is now freed memory */
+  /* 允许可执行程序被访问 */
+  if(cur->pcb->fd_tb[2] != NULL){
+    file_allow_write(cur->pcb->fd_tb[2]);
+  }
+  
+
+  /* 找到父母进程，保存退出信息 */
+  struct process *p = process_get_parent(cur->pcb);
+  if(p != NULL){
+    struct child_info* c = process_get_child(p, get_pid(cur->pcb));
+    if(c == NULL)
+      PANIC("DEBUG : NO WAY");
+
+    c->dead = true;
+    c->status = status;
+  }
+
+  /* 释放pcb*/
+  pid_t cur_pit = get_pid(cur->pcb); 
   struct process* pcb_to_free = cur->pcb;
   cur->pcb = NULL;
-  free(pcb_to_free);
+  process_free(pcb_to_free);
 
-  sema_up(&temporary);
+  /* 让等待的父母进程运行 */
+  if(p->waiting == cur_pit)
+    sema_up(&p->sema);
+
+  /* 释放文件锁 */
+  filesys_release_lock();
+
   thread_exit();
 }
 
@@ -259,7 +373,7 @@ struct Elf32_Phdr {
 #define PF_W 2 /* Writable. */
 #define PF_R 4 /* Readable. */
 
-static bool setup_stack(void** esp);
+static bool setup_stack(void** esp, const char* comd, char **file_name);
 static bool validate_segment(const struct Elf32_Phdr*, struct file*);
 static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t read_bytes,
                          uint32_t zero_bytes, bool writable);
@@ -268,22 +382,33 @@ static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t 
    Stores the executable's entry point into *EIP
    and its initial stack pointer into *ESP.
    Returns true if successful, false otherwise. */
-bool load(const char* file_name, void (**eip)(void), void** esp) {
+bool load(const char* comd, void (**eip)(void), void** esp) {
   struct thread* t = thread_current();
+  struct process* pcb = t->pcb;
   struct Elf32_Ehdr ehdr;
   struct file* file = NULL;
   off_t file_ofs;
   bool success = false;
   int i;
-
+  char *file_name;
+  
   /* Allocate and activate page directory. */
-  t->pcb->pagedir = pagedir_create();
-  if (t->pcb->pagedir == NULL)
+  pcb->pagedir = pagedir_create();
+  if (pcb->pagedir == NULL)
     goto done;
   process_activate();
 
+  /* Set up stack. */
+  if (!setup_stack(esp, comd, &file_name))
+    goto done;
+
+
   /* Open executable file. */
-  file = filesys_open(file_name);
+  /*
+  struct file* d = filesys_open(file_name);
+  if(d != NULL)
+    file_close(d);*/
+  file = process_open_file(file_name);
   if (file == NULL) {
     printf("load: %s: open failed\n", file_name);
     goto done;
@@ -324,8 +449,8 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
       case PT_LOAD:
         if (validate_segment(&phdr, file)) {
           bool writable = (phdr.p_flags & PF_W) != 0;
-          uint32_t file_page = phdr.p_offset & ~PGMASK;
-          uint32_t mem_page = phdr.p_vaddr & ~PGMASK;
+          uint32_t file_page = phdr.p_offset & ~PGMASK;  /* phdr.p_offset 这个是段起始地址（内存）*/
+          uint32_t mem_page = phdr.p_vaddr & ~PGMASK;    /* phdr.p_vaddr 这个是段起始地址（内存）*/
           uint32_t page_offset = phdr.p_vaddr & PGMASK;
           uint32_t read_bytes, zero_bytes;
           if (phdr.p_filesz > 0) {
@@ -341,29 +466,29 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
           }
           if (!load_segment(file, file_page, (void*)mem_page, read_bytes, zero_bytes, writable))
             goto done;
-        } else
+
+        } else  
           goto done;
         break;
     }
   }
 
-  /* Set up stack. */
-  if (!setup_stack(esp))
-    goto done;
 
   /* Start address. */
   *eip = (void (*)(void))ehdr.e_entry;
 
   success = true;
 
+  file_deny_write(file);                             /* 成功的话要关闭可执行文件的写 */
+  return success;                                    /* 不关闭文件 */
+
 done:
   /* We arrive here whether the load is successful or not. */
-  file_close(file);
+  process_close_file(t->pcb,file);
   return success;
 }
 
 /* load() helpers. */
-
 static bool install_page(void* upage, void* kpage, bool writable);
 
 /* Checks whether PHDR describes a valid, loadable segment in
@@ -442,6 +567,15 @@ static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t 
     size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
     size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
+#ifdef VM
+    struct process *pcb = thread_current()->pcb;
+    if(page_read_bytes > 0){
+      pages_reg_exec(pcb, file, ofs, page_read_bytes , writable, upage, true);
+      ofs += PGSIZE;
+    }
+    else 
+      pages_reg(pcb, upage, ZERO, true);
+#else
     /* Get a page of memory. */
     uint8_t* kpage = palloc_get_page(PAL_USER);
     if (kpage == NULL)
@@ -459,6 +593,7 @@ static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t 
       palloc_free_page(kpage);
       return false;
     }
+#endif
 
     /* Advance. */
     read_bytes -= page_read_bytes;
@@ -468,24 +603,145 @@ static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t 
   return true;
 }
 
+/* 解析命令行参数 */
+static bool setup_stack_contents(void** esp, const char* comd, char** file_name) {
+  uint8_t* stack_top = (uint8_t*)PHYS_BASE;
+  uint8_t* stack_bottom = stack_top - PGSIZE;
+  
+  // 解析命令字符串
+  char* argv[100];
+  int i = 0;
+
+  char* cmd_copy = malloc(strlen(comd) + 1);
+  if (!cmd_copy) return false;
+  strlcpy(cmd_copy, comd, strlen(comd) + 1);
+  
+  // 第一步：计算参数个数
+  int argc = 0;
+  
+  char* temp_token;
+  char* temp_save_ptr;
+  for (temp_token = strtok_r(cmd_copy, " ", &temp_save_ptr); temp_token != NULL;
+       temp_token = strtok_r(NULL, " ", &temp_save_ptr)) {
+    argv[argc++] = temp_token;
+
+    int len = strlen(temp_token) + 1; // 包括null终止符
+    stack_top -= len;
+
+    if (stack_top < stack_bottom) {
+      free(cmd_copy);
+      return false;
+    }
+  }
+  
+  if (argc == 0) {
+    free(cmd_copy);
+    return false; // 没有参数，无效命令
+  }
+  
+  /* 保存文件名 */
+  char *file_path = malloc(strlen(argv[0]) + 1);
+  if (!file_path) {
+    free(cmd_copy);
+    return false;
+  }
+  strlcpy(file_path, argv[0], strlen(argv[0]) + 1);
+  *file_name = file_path;
+
+
+  // 第二步：使用同一个cmd_copy进行参数解析和存储
+  uint8_t* temp_stack = stack_top;
+  for(i = 0; i < argc; i++){
+    int len = strlen(argv[i]) + 1;
+    
+    memcpy(temp_stack, argv[i], len);
+    argv[i] = (char*)temp_stack;
+    temp_stack += len;
+  }
+  free(cmd_copy);
+  
+  // 字对齐（4字节对齐）
+  stack_top -= (uint32_t)stack_top % 4;
+  
+  // 检查栈溢出
+  if (stack_top < stack_bottom) {
+    if (file_path) free(file_path);
+    return false;
+  }
+  
+  // 压入argv[]指针数组（逆序）
+  int argv_array_size = (argc + 1) * sizeof(char*);
+  char** argv_ptrs = (char**)(stack_top - argv_array_size);
+  
+  // 检查栈溢出
+  if ((uint8_t*)argv_ptrs < stack_bottom) {
+    if (file_path) free(file_path);
+    return false;
+  }
+  
+  for (i = 0; i < argc; i++) {
+    argv_ptrs[i] = argv[i];
+  }
+  argv_ptrs[argc] = NULL; // 结束标记
+  
+  // 更新栈顶
+  stack_top = (uint8_t*)argv_ptrs;
+  
+  /* 最后栈16字节对齐的关键 */
+  stack_top -= ((uint32_t)(stack_top + 8) % 16);
+
+  // 压入argv指针
+  stack_top -= sizeof(char**);
+  if (stack_top < stack_bottom) {
+    if (file_path) free(file_path);
+    return false;
+  }
+  *(char***)stack_top = argv_ptrs;
+  
+  // 压入argc
+  stack_top -= sizeof(int);
+  if (stack_top < stack_bottom) {
+    if (file_path) free(file_path);
+    return false;
+  }
+  *(int*)stack_top = argc;
+
+    // 压入返回地址（0表示程序入口）
+  stack_top -= sizeof(void*);
+  if (stack_top < stack_bottom) {
+    if (file_path) free(file_path);
+    return false;
+  }
+  *(void**)stack_top = 0;
+  
+
+  // 设置栈指针
+  *esp = stack_top;
+  
+  return true;
+}
+
 /* Create a minimal stack by mapping a zeroed page at the top of
    user virtual memory. */
-static bool setup_stack(void** esp) {
+static bool setup_stack(void** esp, const char* comd, char** file_name) {
   uint8_t* kpage;
   bool success = false;
+  void* init_stack = ((uint8_t*)PHYS_BASE) - PGSIZE;
 
   kpage = palloc_get_page(PAL_USER | PAL_ZERO);
   if (kpage != NULL) {
-    success = install_page(((uint8_t*)PHYS_BASE) - PGSIZE, kpage, true);
+    success = install_page(init_stack, kpage, true);
     if (success){
-      int FREE_SETP = 12;         //这里FREE_SETP>=12 并且满足0-FREE_SETP-12 % 16 = 0
-      *esp = PHYS_BASE - 20;
-      *(uint32_t *)(*esp + 4) = 1;
-      
+      success = setup_stack_contents(esp, comd, file_name);
+#ifdef VM
+      struct process* pcb = thread_current()->pcb;
+      pages_reg(pcb, init_stack, SWAP, false);
+#endif
     }
-    else
-      palloc_free_page(kpage);
   }
+
+  if(!success)
+    palloc_free_page(kpage);
   return success;
 }
 
@@ -503,8 +759,10 @@ static bool install_page(void* upage, void* kpage, bool writable) {
 
   /* Verify that there's not already a page at that virtual
      address, then map our page there. */
-  return (pagedir_get_page(t->pcb->pagedir, upage) == NULL &&
-          pagedir_set_page(t->pcb->pagedir, upage, kpage, writable));
+  bool success = pagedir_get_page(t->pcb->pagedir, upage) == NULL &&
+          pagedir_set_page(t->pcb->pagedir, upage, kpage, writable);
+  
+  return success;
 }
 
 /* Returns true if t is the main thread of the process p */
@@ -571,3 +829,213 @@ void pthread_exit(void) {}
    This function will be implemented in Project 2: Multithreading. For
    now, it does nothing. */
 void pthread_exit_main(void) {}
+
+
+
+/* 添加子进程 */
+bool child_add(struct process* p, struct process* c){
+  struct child_info* ci = (struct child_info*)malloc(sizeof(struct child_info));
+  if(ci == NULL)
+    return false;
+  
+  ci->child = get_pid(c);
+  ci->dead = false;
+  ci->status = 0;
+  list_push_front(&p->children,&ci->elem);
+  return true;
+}
+
+/* 找到父母进程 */
+static struct process* process_get_parent(struct process* c){
+  pid_t ppid = c->parent;
+  struct list_elem *e;
+  for(e = list_begin(&all_list); e != list_end(&all_list); e = list_next(e)){
+    struct thread *t= list_entry(e, struct thread, allelem);
+    struct process *p = t->pcb;
+    if(ppid == get_pid(p))
+      return p;
+  }
+  return NULL;
+}
+
+/* 找到孩子进程 */
+static struct child_info* process_get_child(struct process* p, pid_t cpid){
+  struct child_info* c;
+  struct list_elem *e;
+
+  for(e = list_begin(&p->children); e != list_end(&p->children); e = list_next(e)){
+    c = list_entry(e, struct child_info, elem);
+    if(c->child == cpid)
+      return c;
+  }
+  return NULL;
+}
+
+/* 清除一个pcb */
+static void process_free(struct process* p){
+  struct list* list = &(p->children);
+  struct list_elem* e = list_begin(list);
+  /* 清理所有子进程信息 */
+  while(e != list_end(list)){
+    struct list_elem *ce = e;
+    e = list_next(e);
+
+    struct child_info* ci = list_entry(ce, struct child_info, elem);
+    list_remove(ce);
+    free(ci);
+  }
+
+  /* 关闭所有已打开文件 */
+  int len = sizeof(p->fd_tb)/sizeof(p->fd_tb[0]);
+  for(int i = 2; i < len; i++){
+    if(p->fd_tb[i] != NULL){
+      
+      file_close(p->fd_tb[i]);
+      p->fd_tb[i] = NULL;
+    }
+  }
+
+  
+#ifdef VM
+  /* 释放辅助页 和 mmap*/
+  free(p->pt.pages);
+
+  for(size_t i = 0; i < p->mmap_len; i++)
+    if(&p->mmap_list[i].file)
+      file_close(p->mmap_list[i].file);
+  free(p->mmap_list);
+#endif 
+
+  free(p);
+}
+
+/* 申请一个fd */
+static int fd_tb_offer(){
+  struct process* cur = thread_current()->pcb;
+  int len = sizeof(cur->fd_tb)/sizeof(cur->fd_tb[0]);
+  for(int i = 2; i < len; i++){
+    if(cur->fd_tb[i] == NULL)
+      return i;
+  }
+  PANIC(" DEBUG ");
+  //return -1;
+}
+
+int file_get_fd(struct file* file){
+  if(file == NULL)  return -1;
+
+  struct process* cur = thread_current()->pcb;
+  int len = sizeof(cur->fd_tb)/sizeof(cur->fd_tb[0]);
+  for(int i = 2; i < len; i++){
+    if(cur->fd_tb[i] == file)
+      return i;
+  }
+  return -1;
+}
+
+/* 初始化fd_tb */
+static void fd_tb_init(struct process* pcb){
+  int len = sizeof(pcb->fd_tb)/sizeof(pcb->fd_tb[0]);
+  for(int i = 0; i < len; i++){
+    pcb->fd_tb[i] = NULL;
+  }
+}
+
+
+
+/* 打开某个文件 */
+struct file* process_open_file(const char* name){
+
+  struct process* cur = thread_current()->pcb;
+  struct file* file = filesys_open(cur->dir, name);
+  cur->fd_tb[fd_tb_offer()] = file;
+  return file;
+}
+
+/* 关闭文件 */
+static void process_close_file(struct process* pcb, struct file* file){
+  int len = sizeof(pcb->fd_tb)/sizeof(pcb->fd_tb[0]);
+  for(int i = 0; i < len; i++){
+    if(pcb->fd_tb[i] == file){
+      pcb->fd_tb[i] = NULL;
+      file_close(file);
+      return;
+    }
+  }
+
+  PANIC(" DEBUG ");
+}
+
+#ifdef VM
+
+/* 在当前进程中分配一块mmap内存映射 */
+size_t mmap_alloc(struct process* pcb, struct file* file, void* uaddr){
+  ASSERT(pcb->mmap_len < 10);
+  ASSERT(!pg_ofs(uaddr));
+
+  size_t len = pcb->mmap_len;
+  struct mmap* mmap = &pcb->mmap_list[len];
+  mmap->file = file;
+  mmap->uaddr = uaddr;
+  pcb->mmap_len ++;
+  
+  return len;
+}
+
+/* 在指定的mmap内存建立映射 */
+bool mmap_init(struct process* pcb, struct file* file, void* uaddr){
+  ASSERT(!pg_ofs(uaddr));
+  size_t size = file_length(file);
+  void* upage = uaddr;
+
+  /* 检查内存是否被占用 */
+  for(size_t i = 0 ; i < size; i+=PGSIZE){
+    if(pagedir_had_page(pcb->pagedir, upage))
+      return false;
+    upage += PGSIZE;
+  } 
+
+  upage = uaddr;
+
+  for(size_t i = 0 ; i < size; i+=PGSIZE){
+    size_t read_bytes = size - i > PGSIZE ? PGSIZE:(size - i);
+    pages_reg_mmap(pcb, file, i, read_bytes, upage, true);
+
+    upage += PGSIZE;
+  } 
+  return true;
+}
+
+
+/* unmmap */
+void mmap_close(struct process* pcb, int m_t){
+  ASSERT(m_t >= 0 && (size_t)m_t < pcb->mmap_len);
+
+  struct mmap* mmap = &pcb->mmap_list[m_t];
+  if(mmap->file){
+    void* upage = mmap->uaddr;
+    struct file* file = mmap->file;
+    size_t size = file_length(file);
+
+
+    for(size_t i = 0 ; i < size; i += PGSIZE){
+      struct page* page = pages_get(&pcb->pt, pagedir_get_avl(pcb->pagedir, upage), upage);
+      void* kpage = pagedir_get_page(pcb->pagedir, upage);        /* kpage != NULL 说明在物理页中*/
+      ASSERT(page->type == MMAP);
+      if(kpage && pagedir_is_dirty(pcb->pagedir, upage)){
+        file_seek(page->file, page->pos);
+        file_write(page->file, kpage, page->read_bytes);
+        /* 释放页帧 */
+        palloc_free_page(kpage);
+      }
+      pagedir_set_lazy(pcb->pagedir, upage, false);
+      pagedir_clear_page(pcb->pagedir, upage);
+      upage += PGSIZE;
+    } 
+
+    file_close(mmap->file);
+    memset(mmap, 0, sizeof(struct mmap));
+  }
+}
+
+#endif

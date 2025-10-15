@@ -116,6 +116,20 @@ static void verify(void) {
 void test_main(void) {
   init();
   sort_chunks();
+  /*
+  msg("验证每个块是否已排序");
+  for (size_t i = 0; i < CHUNK_CNT; i++) {
+    unsigned char* chunk = buf1 + CHUNK_SIZE * i;
+    for (size_t j = 0; j < CHUNK_SIZE - 1; j++) {
+      if (chunk[j] > chunk[j + 1]) {
+        fail("块 %zu 未正确排序: 位置 %zu (%d) > 位置 %zu (%d)", 
+             i, j, chunk[j], j + 1, chunk[j + 1]);
+      }
+    }
+  }
+  msg("所有块排序验证通过");
+
+  */
   merge();
   verify();
 }

@@ -34,6 +34,7 @@
 #include <stdint.h>
 
 /* Amount of physical memory, in 4 kB pages. */
+/* 物理页的总数 */
 extern uint32_t init_ram_pages;
 #endif
 

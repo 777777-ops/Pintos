@@ -23,6 +23,7 @@
 #include "threads/palloc.h"
 #include "threads/pte.h"
 #include "threads/thread.h"
+#include "threads/shell.h"           //new
 #ifdef USERPROG
 #include "userprog/process.h"
 #include "userprog/exception.h"
@@ -39,6 +40,9 @@
 #include "devices/ide.h"
 #include "filesys/filesys.h"
 #include "filesys/fsutil.h"
+#endif
+#ifdef VM
+#include "vm/swap.h"
 #endif
 
 /* Page directory with kernel mappings only. */
@@ -108,9 +112,12 @@ int main(void) {
   timer_init();
   kbd_init();
   input_init();
+
 #ifdef USERPROG
   exception_init();
   syscall_init();
+  /* Give main thread a minimal PCB so it can launch the first process */
+  userprog_init();
 #endif
 
   /* Start thread scheduler and enable interrupts. */
@@ -118,16 +125,17 @@ int main(void) {
   serial_init_queue();
   timer_calibrate();
 
-#ifdef USERPROG
-  /* Give main thread a minimal PCB so it can launch the first process */
-  userprog_init();
-#endif
-
+  /* 修改 */
+  synch_init();
+  
 #ifdef FILESYS
   /* Initialize file system. */
   ide_init();
   locate_block_devices();
   filesys_init(format_filesys);
+  #ifdef VM
+  swap_init();
+  #endif
 #endif
 
   printf("Boot complete.\n");
@@ -137,7 +145,7 @@ int main(void) {
     run_actions (argv);
   } else {
     // TODO: no command line passed to kernel. Run interactively 
-    printf("关闭！\n");
+    run_shell();
   }
 
 
@@ -161,17 +169,18 @@ static void bss_init(void) {
    kernel virtual mapping, and then sets up the CPU to use the
    new page directory.  Points init_page_dir to the page
    directory it creates. */
+/* 重新创建页目录、页表，实现所有物理页的映射 */
 static void paging_init(void) {
   uint32_t *pd, *pt;
   size_t page;
   extern char _start, _end_kernel_text;
 
-  pd = init_page_dir = palloc_get_page(PAL_ASSERT | PAL_ZERO);
+  pd = init_page_dir = palloc_get_page(PAL_ASSERT | PAL_ZERO);     
   pt = NULL;
-  for (page = 0; page < init_ram_pages; page++) {
-    uintptr_t paddr = page * PGSIZE;
-    char* vaddr = ptov(paddr);
-    size_t pde_idx = pd_no(vaddr);
+  for (page = 0; page < init_ram_pages; page++) {              
+    uintptr_t paddr = page * PGSIZE;                                
+    char* vaddr = ptov(paddr);                                       
+    size_t pde_idx = pd_no(vaddr);                        
     size_t pte_idx = pt_no(vaddr);
     bool in_kernel_text = &_start <= vaddr && vaddr < &_end_kernel_text;
 

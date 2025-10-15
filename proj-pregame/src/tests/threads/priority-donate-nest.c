@@ -40,12 +40,12 @@ void test_priority_donate_nest(void) {
 
   locks.a = &a;
   locks.b = &b;
-  thread_create("medium", PRI_DEFAULT + 1, medium_thread_func, &locks);
+  thread_create("medium", PRI_DEFAULT + 1, medium_thread_func, &locks);   //medium = 32 > main = 31
   thread_yield();
   msg("Low thread should have priority %d.  Actual priority: %d.", PRI_DEFAULT + 1,
       thread_get_priority());
 
-  thread_create("high", PRI_DEFAULT + 2, high_thread_func, &b);
+  thread_create("high", PRI_DEFAULT + 2, high_thread_func, &b);          // high = 33 > main = 32
   thread_yield();
   msg("Low thread should have priority %d.  Actual priority: %d.", PRI_DEFAULT + 2,
       thread_get_priority());
@@ -60,8 +60,8 @@ void test_priority_donate_nest(void) {
 static void medium_thread_func(void* locks_) {
   struct locks* locks = locks_;
 
-  lock_acquire(locks->b);
-  lock_acquire(locks->a);
+  lock_acquire(locks->b);         //medium 持有 b
+  lock_acquire(locks->a);         //medium 想要a，却被main持有   此时main = 32
 
   msg("Medium thread should have priority %d.  Actual priority: %d.", PRI_DEFAULT + 2,
       thread_get_priority());
@@ -80,7 +80,7 @@ static void medium_thread_func(void* locks_) {
 static void high_thread_func(void* lock_) {
   struct lock* lock = lock_;
 
-  lock_acquire(lock);
+  lock_acquire(lock);                //high 想要 b  b被medium(32)持有    此时medium = 33
   msg("High thread got the lock.");
   lock_release(lock);
   msg("High thread finished.");

@@ -33,10 +33,12 @@ switch_threads:
 	mov thread_stack_ofs, %edx
 
 	# Save current stack pointer to old thread's stack, if any.
+	#第一个参数————旧线程放入  eax
 	movl SWITCH_CUR(%esp), %eax
 	movl %esp, (%eax,%edx,1)
 
 	# Restore stack pointer from new thread's stack.
+	#第二个参数————新线程放入  ecx
 	movl SWITCH_NEXT(%esp), %ecx
 	movl (%ecx,%edx,1), %esp
 

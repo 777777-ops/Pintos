@@ -1,16 +1,33 @@
 #include "userprog/exception.h"
 #include <inttypes.h>
 #include <stdio.h>
+#include <string.h>
 #include "userprog/gdt.h"
 #include "userprog/process.h"
+#include "userprog/pagedir.h"
+#include "filesys/file.h"
 #include "threads/interrupt.h"
+#include "threads/palloc.h"
 #include "threads/thread.h"
+#include "threads/vaddr.h"
+#ifdef VM
+#include "vm/swap.h"
+#include "vm/page.h"
+#endif
+
+#define MAX_EXTEND 4 * PGSIZE       
+
 
 /* Number of page faults processed. */
 static long long page_fault_cnt;
 
 static void kill(struct intr_frame*);
 static void page_fault(struct intr_frame*);
+
+#ifdef VM
+static void handle_lazy_load(struct process* pcb, void* fault_addr);
+static bool stack_extensible(struct process* pcb, void* fault_addr, void* user_esp);
+#endif
 
 /* Registers handlers for interrupts that can be caused by user
    programs.
@@ -78,7 +95,7 @@ static void kill(struct intr_frame* f) {
       printf("%s: dying due to interrupt %#04x (%s).\n", thread_name(), f->vec_no,
              intr_name(f->vec_no));
       intr_dump_frame(f);
-      process_exit();
+      process_exit(-1);
       NOT_REACHED();
 
     case SEL_KCSEG:
@@ -110,9 +127,12 @@ static void kill(struct intr_frame* f) {
    [IA32-v3a] section 5.15 "Exception and Interrupt Reference". */
 static void page_fault(struct intr_frame* f) {
   bool not_present; /* True: not-present page, false: writing r/o page. */
-  bool write;       /* True: access was write, false: access was read. */
+  //bool write;       /* True: access was write, false: access was read. */
   bool user;        /* True: access by user, false: access by kernel. */
   void* fault_addr; /* Fault address. */
+  void *user_esp;
+  struct process* pcb = thread_current()->pcb;
+  ASSERT(pcb->pagedir != NULL);     
 
   /* Obtain faulting address, the virtual address that was
      accessed to cause the fault.  It may point to code or to
@@ -132,14 +152,128 @@ static void page_fault(struct intr_frame* f) {
 
   /* Determine cause. */
   not_present = (f->error_code & PF_P) == 0;
-  write = (f->error_code & PF_W) != 0;
+  //write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
+  if(user)
+   user_esp = f->esp;
+  else
+   user_esp = thread_current()->user_esp;       /* 内核引起的栈拓展还没实现 */
 
-  /* To implement virtual memory, delete the rest of the function
-     body, and replace it with code that brings in the page to
-     which fault_addr refers. */
-  printf("Page fault at %p: %s error %s page in %s context.\n", fault_addr,
-         not_present ? "not present" : "rights violation", write ? "writing" : "reading",
-         user ? "user" : "kernel");
-  kill(f);
+  /* 页面存在 那么一定是访问权限错误*/
+  if(!not_present){
+      /*
+      printf("Page fault at %p: rights violation error %s page in %s context.\n", fault_addr,
+            write ? "writing" : "reading",
+            user ? "user" : "kernel");
+
+
+      printf("%s: dying due to interrupt %#04x (%s).\n", thread_name(), f->vec_no,
+             intr_name(f->vec_no));
+      intr_dump_frame(f);*/
+      process_error_exit();
+      return;
+  }else{
+      /* 内核地址不存在  说明代码有BUG */
+      if(is_kernel_vaddr(fault_addr))
+         PANIC(" DEBUG ");
+         
+      
+
+#ifdef VM
+      /* 懒加载页 */
+      if(pagedir_is_lazy(pcb->pagedir, fault_addr)){
+         handle_lazy_load(pcb, fault_addr);
+         return;
+      }
+
+      /* 判断并处理栈拓展 */
+      else if(stack_extensible(pcb, fault_addr, user_esp))
+         return;
+      else{}
+      
+#endif
+
+      /* 访问到无效地址 */
+      process_error_exit();
+  }
+
 }
+
+#ifdef VM
+
+
+/* 处理懒加载的页，先获取一块用户池的页，然后根据不同情况操作 */
+static void handle_lazy_load(struct process* pcb, void* fault_addr){
+   void *kaddr = palloc_get_page(PAL_USER);
+   if(kaddr == NULL)
+      PANIC(" DEBUG ");
+
+   void *uaddr = pg_round_down(fault_addr);
+   struct page* page = pages_get(&pcb->pt, pagedir_get_avl(pcb->pagedir, fault_addr), uaddr);
+   if(page->type == SWAP)
+      swap_in(kaddr, page->pos);
+   else if(page->type == FILE || page->type == MMAP){
+      int read_bytes = page->read_bytes;
+      int zero_bytes = PGSIZE - read_bytes;
+      file_seek(page->file, page->pos);
+      if(file_read(page->file, kaddr, read_bytes) != read_bytes)
+         PANIC(" DEBUG ");
+      memset(kaddr + read_bytes, 0, zero_bytes);
+   }
+   else if(page->type == ZERO)
+      memset(kaddr, 0, PGSIZE);
+   else  
+      PANIC(" NO WAY ");
+
+   size_t avl = pagedir_get_avl(pcb->pagedir, uaddr);
+   if(pagedir_get_page(pcb->pagedir, uaddr) == NULL &&
+          pagedir_set_page(pcb->pagedir, uaddr, kaddr, page->flags & WRITE))
+      pagedir_set_avl(pcb->pagedir, uaddr, avl);
+   else
+      PANIC(" DEBUG ");
+}
+
+/*  不超过最大可拓展范围的就是合理的拓展地址，一旦合理拓展就执行下面操作，
+   为缺页地址分配物理页以及辅助页，并且在原栈顶到缺页地址中间懒加载 
+   
+    (这里由于教学需要，默认fault_addr >= user_esp才是栈拓展)
+   */
+static bool stack_extensible(struct process* pcb, void* fault_addr, void* user_esp){
+   uint32_t* pd = pcb->pagedir;
+   void* init_stack = ((uint8_t*)PHYS_BASE) - PGSIZE;
+
+   void* stack_up = pagedir_down_loaded(pd, init_stack);
+   if((uint32_t)stack_up - (uint32_t)fault_addr > MAX_EXTEND)
+      return false;
+   if((uint32_t)fault_addr < (uint32_t)user_esp - 32)
+      return false;
+   
+   void* uaddr = pg_round_down(fault_addr);
+   void* kaddr =  palloc_get_page(PAL_USER);
+   if(pagedir_get_page(pd, uaddr) == NULL &&
+          pagedir_set_page(pd, uaddr, kaddr, true)){}
+   else PANIC(" DEBUG ");
+
+   /* 分配成功后要创建辅助页 */
+   pages_reg(pcb, uaddr, SWAP, false);
+
+   /* 将中间的页懒加载 */
+   uaddr += PGSIZE;
+   while(uaddr < stack_up){
+      pages_reg(pcb, uaddr, SWAP, true);
+      uaddr += PGSIZE;
+   }
+   return true;
+
+}
+
+#endif
+
+
+         /*
+         printf("Page fault at %p: not present error violative address in %s context.\n", fault_addr,
+               user ? "user" : "kernel");   
+         
+         printf("%s: dying due to interrupt %#04x (%s).\n", thread_name(), f->vec_no,
+             intr_name(f->vec_no));
+         intr_dump_frame(f); */

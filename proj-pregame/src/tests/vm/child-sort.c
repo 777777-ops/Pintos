@@ -22,6 +22,7 @@ int main(int argc UNUSED, char* argv[]) {
   CHECK((handle = open(argv[1])) > 1, "open \"%s\"", argv[1]);
 
   size = read(handle, buf, sizeof buf);
+
   for (i = 0; i < size; i++)
     histogram[buf[i]]++;
   p = buf;
