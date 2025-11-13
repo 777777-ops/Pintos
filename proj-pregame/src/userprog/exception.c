@@ -125,6 +125,16 @@ static void kill(struct intr_frame* f) {
    can find more information about both of these in the
    description of "Interrupt 14--Page Fault Exception (#PF)" in
    [IA32-v3a] section 5.15 "Exception and Interrupt Reference". */
+/* [笔者]对page_fault进行了重塑，使得page_fault不再只是输出报错信息，
+   而是能够更加灵活地处理缺页、错误地址、错误访问权限          */
+/* 首先我们要先理清CPU什么时候触发中断向量14的页错误page_fault()：
+      CPU在内核态时:a.无效地址;b.权限不足(尝试写入只读页)c.地址属于
+   用户空间，但当前未分配物理页。本os直接断言a和b错误为系统错误，即
+   内核代码漏洞。
+      至于c情况，会先后判定其是否处于按需分配状态(懒加载)、合法栈拓展
+   只有在上面两种情况判断失败后，才断言其是无效地址，但处理方法于a、b
+   不同，不断言其是内核代码漏洞，而是认为用户程序异常、危险，终止用户
+   程序process_error_exit()*/
 static void page_fault(struct intr_frame* f) {
   bool not_present; /* True: not-present page, false: writing r/o page. */
   //bool write;       /* True: access was write, false: access was read. */
@@ -157,11 +167,11 @@ static void page_fault(struct intr_frame* f) {
   if(user)
    user_esp = f->esp;
   else
-   user_esp = thread_current()->user_esp;       /* 内核引起的栈拓展还没实现 */
+   user_esp = thread_current()->user_esp;       /* 内核引起的栈拓展 */
 
   /* 页面存在 那么一定是访问权限错误*/
   if(!not_present){
-      /*
+      /*报错信息注释
       printf("Page fault at %p: rights violation error %s page in %s context.\n", fault_addr,
             write ? "writing" : "reading",
             user ? "user" : "kernel");
@@ -233,10 +243,22 @@ static void handle_lazy_load(struct process* pcb, void* fault_addr){
       PANIC(" DEBUG ");
 }
 
-/*  不超过最大可拓展范围的就是合理的拓展地址，一旦合理拓展就执行下面操作，
+/*    不超过最大可拓展范围的就是合理的拓展地址，一旦合理拓展就执行下面操作，
    为缺页地址分配物理页以及辅助页，并且在原栈顶到缺页地址中间懒加载 
    
-    (这里由于教学需要，默认fault_addr >= user_esp才是栈拓展)
+   关于栈拓展的“合理”有很大的可讨论性：
+      (uint32_t)stack_up - (uint32_t)fault_addr <= MAX_EXTEND
+      (uint32_t)fault_addr >= (uint32_t)user_esp - 32
+      这里的栈拓展判定合理性较为“苛刻”，其不仅要求拓展的fault_addr不能超出
+   stack_up栈段顶（区别于栈顶）的某个阈值，甚至还要求不能超过user_esp + 32。
+      后者其实是向教学测试的妥协，其教学意义在于使系统实现者考虑到pushall
+   这条汇编指令。但在实际生产中这定然不是明智的选择，因为也必须考虑到在某函
+   数栈中可能出现int a[1000];之类的大数组分配，那么此时还用32这样8常寄存器
+   长度作为阈值显然就不太合理的了。
+      其实这也是一种安全性和兼容性的考虑，不过笔者还是更倾向于Linux的设计理
+   念（中文翻译）————"宁可错误地允许一些异常的栈访问，也不要错误地拒绝合法
+   的栈扩展"
+
    */
 static bool stack_extensible(struct process* pcb, void* fault_addr, void* user_esp){
    uint32_t* pd = pcb->pagedir;
@@ -266,14 +288,4 @@ static bool stack_extensible(struct process* pcb, void* fault_addr, void* user_e
    return true;
 
 }
-
 #endif
-
-
-         /*
-         printf("Page fault at %p: not present error violative address in %s context.\n", fault_addr,
-               user ? "user" : "kernel");   
-         
-         printf("%s: dying due to interrupt %#04x (%s).\n", thread_name(), f->vec_no,
-             intr_name(f->vec_no));
-         intr_dump_frame(f); */

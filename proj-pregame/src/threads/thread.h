@@ -93,9 +93,11 @@ struct thread {
   char name[16];             /* Name (for debugging purposes). */
   uint8_t* stack;            /* Saved stack pointer. */
   int priority;              /* Priority. */
+  struct list_elem allelem;  /* List element for all threads list. */
+
+  /*线程BSD调度使用*/
   int niceness;              /* 友好度 */
   fixed_point_t recent_cpu;  /* 最近占用的cpu频率 */
-  struct list_elem allelem;  /* List element for all threads list. */
 
   /* Shared between thread.c and synch.c. */
   struct list_elem elem; /* List element. */

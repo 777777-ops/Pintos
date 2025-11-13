@@ -10,13 +10,18 @@
 #include "threads/synch.h"
 #include "vm/swap.h"
 
+/* 使用bitmap（位图）维护磁盘交换分区，
+        值得一提，一个物理页帧大小是4KB，但扇区是512B一个扇区
+    我们这里所定义的“槽”(slot)即以一个物理页帧为大小，也就是8
+    个扇区，同时bitmap也是以“槽”作为标志。 
+ */
 #define PAGE_SECTORS PGSIZE/BLOCK_SECTOR_SIZE        
 
 struct block* swap_device;
 static struct bitmap* free_map;    
 struct lock swap_lock;
 
-static uint8_t zero_buffer[BLOCK_SECTOR_SIZE] = {0};    /* DEBUG使用的清空缓冲 */
+static uint8_t zero_buffer[BLOCK_SECTOR_SIZE] = {0};    /* 清空缓冲 */
 
 /* 初始化交换分区 */
 void swap_init(void){

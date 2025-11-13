@@ -13,6 +13,18 @@
 #include "vm/swap.h"
 #include "vm/page.h"
 
+/*  介绍一下物理页帧的布局：
+        物理页帧是由内核全局管理的，其不似辅助页表由pcb管理。
+    假设有RAM中共有1024个PAGE，就要维护1024个物理页帧管理1024个RAM页。
+
+    讨论“为什么内核池的物理页帧都不能或最好不能替换”：
+        1.内核代码肯定不能替换，你能想象系统调用、本页代码、页错误处理等代码
+    被交换吗？肯定是不能的，否则内核连如何执行都不知道
+        2.线程tcb、进程pcb以及进程的页目录、页表不能替换，上述的物理页帧都是
+    使用及其频繁，最好不替换。
+
+*/
+
 extern uint32_t init_ram_pages;
 struct frame* ftable;   /* 页帧表 */
 size_t ker_user_line;   /* 内核用户页帧分界线 <就是内核池的 >=就是用户池的 */
@@ -48,29 +60,6 @@ void frame_table_init(size_t user_pages){
     }
 }
 
-/* 设置页帧的置换状态 */
-void frame_set_stable(void* kaddr, bool stable){
-    lock_acquire(&frame_lock);
-
-    struct frame* frame = vtoframe(kaddr);
-    if(stable)
-        frame->flags |= STABLE;
-    else
-        frame->flags &= ~STABLE;
-
-    lock_release(&frame_lock);
-}
-
-/* 查询页帧是否能被置换 */
-bool frame_is_stable(void* kaddr){
-    lock_acquire(&frame_lock);
-    
-    struct frame* frame = vtoframe(kaddr);
-    bool flag = frame->flags & STABLE;
-
-    lock_release(&frame_lock);
-    return flag;
-}
 
 /* 设置（用户）页帧所在的进程 以及用户虚拟地址*/
 void frame_set_pcb(void *kaddr, struct process* pcb, void *uaddr){
@@ -112,7 +101,7 @@ void frame_clean(void *kaddr){
     lock_release(&frame_lock);
 }
 
-/* 在页帧用户池满的情况下分配（还未实现多页置换） */
+/* 在页帧用户池满的情况下分配（ */
 void *frame_full_get(size_t page_cnt){ 
     lock_acquire(&frame_lock);
 
@@ -124,8 +113,6 @@ void *frame_full_get(size_t page_cnt){
         lock_acquire(&frame_lock);
         frame_out(kaddr + i * PGSIZE);       
         lock_release(&frame_lock);
-
-
         frame_clean(kaddr + i * PGSIZE);
     }
 
@@ -134,10 +121,19 @@ void *frame_full_get(size_t page_cnt){
     return page;
 }
 
+/*  下面讲述一下这里实现的时钟置换算法：
+        在上面的讨论中得出：置换只会发生在用户池中的物理页帧中，
+    因此这里维护的clk_prt只会在用户池中轮换。
+        这里判定页帧是否被访问过利用了CPU架构中访问物理页帧会
+    打上accessed标志的基址，一旦clk_prt发现该页帧“访问”过，就
+    清除“访问”标志，接着轮询。 
+        尽管在下面的算法中支持连续多页置换，但在进程端尽可能不
+    能要求连续多页置换，即使要求连续多页，进程端也要分开向RAM层
+    要求多个碎片页，这并不影响在进程端中虚拟页的连续*/
 
-/*  简单的置换算法:这里笃定所有用户池的页都必须要有pcb，
-   如果某一页没有pcb，相信该页处于已分配但未建立映射的状态
-     只置换一页                 */
+/*      这里笃定所有用户池的物理页帧都必须要有pcb，如果某一页没有pcb，
+    相信该页处于已分配但未建立映射的状态(分配物理页帧并且建立虚拟映射
+    是原子操作)                 */
 static void* frame_algor(size_t page_cnt){
     size_t i = 0;
     size_t MAX_RUN = init_ram_pages - ker_user_line + 1;
@@ -242,5 +238,27 @@ static void frame_out(void* kaddr){
 
 static bool frame_used(struct frame* frame){   return frame->flags & USED;  }
 static bool frame_stable(struct frame* frame){   return frame->flags & STABLE;  }
+/* 设置页帧的置换状态 */
+void frame_set_stable(void* kaddr, bool stable){
+    lock_acquire(&frame_lock);
 
+    struct frame* frame = vtoframe(kaddr);
+    if(stable)
+        frame->flags |= STABLE;
+    else
+        frame->flags &= ~STABLE;
+
+    lock_release(&frame_lock);
+}
+
+/* 查询页帧是否能被置换 */
+bool frame_is_stable(void* kaddr){
+    lock_acquire(&frame_lock);
+    
+    struct frame* frame = vtoframe(kaddr);
+    bool flag = frame->flags & STABLE;
+
+    lock_release(&frame_lock);
+    return flag;
+}
 #endif

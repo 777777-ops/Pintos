@@ -1,10 +1,30 @@
 #ifndef FILESYS_INODE_H
 #define FILESYS_INODE_H
-
+//（增强型修改）
 #include <stdbool.h>
 #include "filesys/off_t.h"
 #include "devices/block.h"
 #include "lib/kernel/list.h"
+
+/*  增强版的inode_disk：其实现了文件空间的可碎片化，允许
+  暂未写入的文件空间实现“虚分配”————不占用实际的磁盘空间
+    下面介绍一下inode_disk的新布局    */
+
+/*  inode:代表一个文件(仅在内存中实现) 
+    inode_disk:代表一块磁盘中的文件扇区(512B) ,其存储在
+  磁盘中，文件打开时虚加载到内存中。inode_disk的功能是:
+  保存该文件的全部信息，例如组成该文件的所有扇区位置、该
+  文件是否是一个目录。
+    在inode_disk中，使用group数组记录每个文件空间的扇区
+  位置，这保证了文件空间的可碎片化。
+    在inode_disk中，使用next_sector分化该文件扇区，组成
+  下面的结构：
+
+  [第一块文件扇区]  [之后的文件扇区]
+  inode_disk    ---> inode_disk --> inode_disk -->..
+  只有第一块文件扇区代表一个文件，之后的文件扇区是为了实现
+  “虚分配”的设计策略。
+*/
 
 #define GROUPS_MAX_LENGTH 60
 #define LAZY_LOAD_LINE 8
@@ -29,7 +49,6 @@ struct inode_disk {
   /* 目录 */
   bool is_dir;                             /* 标记是否是目录 */
   size_t dir_entries;
-  //unsigned char padding[3];                /* 填充字节，保证结构体大小正好是BLOCK_SECTOR_SIZE */
 };
 
 /* In-memory inode. */
@@ -57,49 +76,4 @@ void inode_deny_write(struct inode*);
 void inode_allow_write(struct inode*);
 off_t inode_length(const struct inode*);
 
-
-
 #endif /* filesys/inode.h */
-
-
-
-/* Initializes an inode with LENGTH bytes of data and
-   writes the new inode to sector SECTOR on the file system
-   device.
-   Returns true if successful.
-   Returns false if memory or disk allocation fails. 
-bool inode_create(block_sector_t sector, off_t length) {
-  struct inode_disk* disk_inode = NULL;
-  bool success = false;
-
-  ASSERT(length >= 0);
-
-   If this assertion fails, the inode structure is not exactly
-     one sector in size, and you should fix that. 
-  ASSERT(sizeof *disk_inode == BLOCK_SECTOR_SIZE);
-
-  disk_inode = calloc(1, sizeof *disk_inode);
-  if (disk_inode != NULL) {
-    size_t sectors = bytes_to_sectors(length);
-    disk_inode->length = length;
-    disk_inode->magic = INODE_MAGIC;
-    if (free_map_allocate(sectors, &disk_inode->start)) {
-      block_write(fs_device, sector, disk_inode);
-      if (sectors > 0) {
-        static char zeros[BLOCK_SECTOR_SIZE];
-        size_t i;
-
-        for (i = 0; i < sectors; i++)
-          block_write(fs_device, disk_inode->start + i, zeros);
-      }
-      success = true;
-    }
-    free(disk_inode);
-  }
-
-  return success;
-}
-
-
-
-*/

@@ -2,17 +2,17 @@
 #define VM_MMAP_H
 
 #include "stdint.h"
-#include "lib/kernel/list.h"
-#include "filesys/file.h"
+#include "stdio.h"
 
-struct mmap
-{
+/* 与辅助页page一样，内存文件映射mmap同样是是由进程维护的 */
+
+/* mmap */
+struct mmap{
     struct file* file;
     void* uaddr;
-    struct list_elem elem;
 };
 
-
-
-
-#endif 
+size_t mmap_alloc(struct process* pcb, struct file* file, void* uaddr);
+bool mmap_init(struct process* pcb, struct file* file, void* uaddr);
+void mmap_close(struct process* pcb, int m_t);
+#endif

@@ -60,7 +60,7 @@ struct thread_priority{
   struct list_elem elem;
   struct thread* thread;
   int old_priorities;
-  struct list locks;
+  struct list locks;    /*该线程锁所接受到的，来自于锁的捐赠*/
   struct lock* waiting;
 };
 

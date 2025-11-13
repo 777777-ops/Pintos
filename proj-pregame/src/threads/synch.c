@@ -343,7 +343,8 @@ static void lock_acquire_prio(struct lock* lock){
 
   old_level = intr_disable();
   holder = lock->holder;
-  if(holder!=NULL && holder->priority <= cur->priority){  
+  //什么时候holder会大于cur，如果真的大于又怎么处理
+  if(holder!=NULL){  
   
     cur_tp->waiting = lock;
     nested_donate(cur_tp);
@@ -357,10 +358,6 @@ static void lock_acquire_prio(struct lock* lock){
     lock->holder = thread_current();
   }
   intr_set_level(old_level);
-
-  //old_level = intr_disable();
-  //intr_set_level(old_level);
-
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -405,6 +402,7 @@ static void lock_release_prio(struct lock* lock){
   enum intr_level old_level;
   struct thread_priority* t_p;
 
+  //如果还未启动捐赠单元就普通操作
   if(list_empty(&priorities_list)){
     sema_up(&lock->semaphore);
     lock->holder = NULL;

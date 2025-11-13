@@ -1,3 +1,4 @@
+//(原创)：重写了所有filesys功能函数
 #include "filesys/filesys.h"
 #include <debug.h>
 #include <stdio.h>
@@ -10,13 +11,43 @@
 #include "filesys/free-map.h"
 #include "filesys/inode.h"
 
+/*笔者对原框架提供的文件系统所有函数都进行了重写，下面指出原框架文件系统和增强版的不同*/
+/*
+  原文件系统：
+    1.仅支持在根目录下操作文件
+    2.不允许目录之间的跳转，本身也就一个目录
+    
+  新文件系统：
+    1.允许目录之间的嵌套，不再局限于根目录
+    2.每个目录中新增了"."和".."两个文件项，允许返回
+    上一级
+    3.每个进程维护自身的工作目录，文件系统通过路径的
+    首字符是否为'/'判断路径是相对还是绝对路径
+    4.实现了文件系统同步机制
+  
+  总结：原框架文件系统可操作性十分有限，仅能维护根目录，
+  而在本代码中，重塑了一整套文件系统操作，使其能实现类
+  Unix的文件操作
+*/    
+
+/*下面指出所有函数的实现思路：
+    1.将进程提供的path提交给filesys_lookup()函数，在
+    函数中会解析路径，返回最后一级文件名(也就是所操作的
+    目标文件)以及目标文件所属的目录的磁盘扇区inode。
+
+    2.根据filesys_lookup()返回的两个参数足以完成目录
+    与文件间的常规操作。
+
+    3.代码实现方面，几乎所有的filesys_xxx()函数都采用
+    done的单标签跳转编程思路，这是因为文件系统操作总会
+    新建许多需要释放的空间资源
+*/
 
 /* Partition that contains the file system. */
 struct block* fs_device;
 
 /* 临时锁 */
 struct lock temporary;
-extern struct lock temporaryF;
 
 static void do_format(void);
 static char** parse_path(const char* path, int* count);
@@ -24,15 +55,13 @@ static void free_path_components(char** components, int count);
 static bool filesys_dir_create(struct inode* parent, block_sector_t allocated, const char* name);
 static char* filesys_lookup(struct dir* cur_dir, const char *path, struct inode** inode);
 
-/* Initializes the file system module.
-   If FORMAT is true, reformats the file system. */
+/* 初始化文件夹系统 */
 void filesys_init(bool format) {
   fs_device = block_get_role(BLOCK_FILESYS);
   if (fs_device == NULL)
     PANIC("No file system device found, can't initialize file system.");
 
   lock_init(&temporary);
-  lock_init(&temporaryF);
   inode_init();
   free_map_init();
 
@@ -50,10 +79,7 @@ void filesys_init(bool format) {
    to disk. */
 void filesys_done(void) { free_map_close(); }
 
-/* Creates a file named NAME with the given INITIAL_SIZE.
-   Returns true if successful, false otherwise.
-   Fails if a file named NAME already exists,
-   or if internal memory allocation fails. */
+/* 新建文件 */
 bool filesys_create(struct dir* cur_dir, const char* path, off_t initial_size) {
   lock_acquire(&temporary);
 
@@ -130,11 +156,7 @@ done:
   return success;
 }
 
-/* Opens the file with the given NAME.
-   Returns the new file if successful or a null pointer
-   otherwise.
-   Fails if no file named NAME exists,
-   or if an internal memory allocation fails. */
+/* 打开文件 */
 struct file* filesys_open(struct dir* cur_dir, const char* path) {
   lock_acquire(&temporary);
 
@@ -159,10 +181,7 @@ done:
   return file;
 }
 
-/* Deletes the file named NAME.
-   Returns true if successful, false on failure.
-   Fails if no file named NAME exists,
-   or if an internal memory allocation fails. */
+/* 删除文件 */
 bool filesys_remove(struct dir* cur_dir, const char* path){
   lock_acquire(&temporary);
 
@@ -373,13 +392,8 @@ static void free_path_components(char** components, int count) {
     free(components);
 }
 
-
-
-
 /* 释放锁资源 */
 void filesys_release_lock(void){
   if(lock_held_by_current_thread(&temporary))
     lock_release(&temporary);
-  if(lock_held_by_current_thread(&temporaryF))
-    lock_release(&temporaryF);
 }

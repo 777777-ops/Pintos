@@ -17,7 +17,33 @@
 #ifdef VM
 #include "vm/frame.h"
 #include "vm/page.h"
+#include "vm/mmap.h"
 #endif
+
+/*就系统调用的安全性进行说明：
+    syscall的主要任务就是为内核态和用户态搭建起数据交流的桥梁，操作系统
+  无法保证用户态的传递的数据可靠性，既有可能因为用户态传递的地址配合已经
+  写定的内核处理代码导致数据泄露、系统崩溃诸多安全性问题。
+    因此，内核作为桥梁的安全可靠性保证的那一端，必须严谨检查由进程传递的
+  地址参数。
+  本os中对进程传递的地址参数做了以下三层防护：
+    1.对于由进程传递的参数个数做check_out_bound检查，不允许其中的某个参
+  数的地址超出虚拟用户边界，即args+N >= PYHS_BASE
+    2.对于由进程传递的地址进行检查，借助CPU的MMU机制以及page_fault页处理
+  机制，对传递的地址进行“假”访问，由硬件设备反馈
+    3.对于由进程传递的地址进行解释检查，有些地址在系统调用中被当成数组(int
+  、char)的形式传递，内核需对对这些连续地址进行边界检查，对于传递的需引用
+  或需写入的连续空间，还必须将其复制到内核堆(malloc)中，理由在下面讨论*/
+
+
+/*  在实现了页替换规则机制后，用户进程的空间是有可能被写入到交换分区中的，
+  下面讨论某块write缓冲区在FILE文件操作时可能出现的“死锁”情况。恰巧该缓
+  冲区被置换到了磁盘交换分区中，那么内核由于需要写入文件数据在向file_system
+  申请了文件锁后，再回头访问这块需被置换回的write缓冲区，就会发生“死锁”。
+    因此，对于write缓冲区，要求复制同样的数据在不会被交换出的内核池中，
+  对于read缓冲区，则是在物理页帧层面，临时将该用户池的页帧设置为stable，
+  即无法换出的标志
+  */
 
 #define EOF -1
 
@@ -154,7 +180,7 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
 #endif 
 
     if(fd == STDOUT_FILENO && flag){
-      putbuf(buffer, len);               /* 偷懒没分割，可能页没必要分割 */
+      putbuf(buffer, len);              
     }else if(fd > 1 && flag){
       /* 这里没有检查权限！ */
       struct file *file = pcb->fd_tb[fd];
@@ -341,10 +367,8 @@ static bool write_read_check(char *str, size_t len){
   uintptr_t start_prt = (uintptr_t)str;
   uintptr_t end_prt = start_prt + len;
 
-  if(is_user_vaddr((void *)start_prt) && is_user_vaddr((void *)end_prt)){
-
+  if(is_user_vaddr((void *)start_prt) && is_user_vaddr((void *)end_prt))
     return true;
-  }
   else
     process_error_exit();
   return false; 
@@ -359,8 +383,7 @@ static void check_out_bound(uint32_t* args, int num){
 
 
 #ifdef VM
-/*  缓冲区上锁防止被置换 
-   有可能缓冲区赖加载，加载到内存，如果访问的地址不存在就直接结束进程 */
+/*  缓冲区上锁防止被置换 */
 static void lock_buffer(char* buffer, size_t len){
   struct process* pcb = thread_current()->pcb;
   void* buffer_start = pg_round_down(buffer);

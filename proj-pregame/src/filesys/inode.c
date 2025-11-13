@@ -1,3 +1,4 @@
+//（增强性修改）
 #include "stdbool.h"
 #include "filesys/inode.h"
 #include <list.h>
@@ -12,8 +13,6 @@
 /* Identifies an inode. */
 #define INODE_MAGIC 0x494e4f44
 
-struct lock temporaryF;
-
 static void inode_release_inner(struct inode*, bool); 
 static struct inode_disk* inode_end_inner(struct inode*);
 static bool inode_disk_lazy_alloc(struct inode_disk*);
@@ -26,12 +25,9 @@ static void inode_release_sectors(struct inode*);
    bytes long. */
 static inline size_t bytes_to_sectors(off_t size) { return DIV_ROUND_UP(size, BLOCK_SECTOR_SIZE); }
 
-
-/* Returns the block device sector that contains byte offset POS
-   within INODE.
-   Returns -1 if INODE does not contain data for a byte at offset
-   POS. */
-/* 实现碎片空间需要重写该函数 */
+/*根据新设定的inode布局，在单个文件空间中定位扇区的的算法有所改变：
+    1.先遍历到pos所属的inode_disk(管理块)中
+    2.再利用管理块中的所记录的sector扇区信息遍历到pos指定扇区 */
 static block_sector_t byte_to_sector(const struct inode* inode, off_t pos) {
   ASSERT(inode != NULL);
   if (pos < inode->data->length){
@@ -85,12 +81,8 @@ static struct list open_inodes;
 /* Initializes the inode module. */
 void inode_init(void) { list_init(&open_inodes); }
 
-/* Initializes an inode with LENGTH bytes of data and
-   writes the new inode to sector SECTOR on the file system
-   device.
-   Returns true if successful.
-   Returns false if memory or disk allocation fails. */
-/* 修改，现在不管LENGTH多少，如果load==false，初始创建的文件都是0。 */
+/*  需提供一个空闲扇区SECTOR作为该文件的管理块，LOAD标志该文件是否需要实
+  加载，IS_DIR标志该新建的文件是否是一个目录文件   */
 bool inode_create(block_sector_t sector, off_t length, bool load, bool is_dir) {
   struct inode_disk* disk_inode = NULL;
 
@@ -132,9 +124,9 @@ bool inode_create(block_sector_t sector, off_t length, bool load, bool is_dir) {
   return false;
 }
 
-/* Reads an inode from SECTOR
-   and returns a `struct inode' that contains it.
-   Returns a null pointer if memory allocation fails. */
+/*  根据提供的管理扇区SECTOR打开一个文件，为适应新文件布局，
+  对本函数做了以下增强：
+    遍历并且打开所有的inode_disk管理块 */
 struct inode* inode_open(block_sector_t sector) {
   struct list_elem* e;
   struct inode* inode;
@@ -358,28 +350,6 @@ error:
     i_d->length = length_saved;
     return false;
 }
-   /* if(lazy){
-        ASSERT(i_d_old->next_sector > 0);
-        free_map_release(i_d_old->next_sector, 1);
-        free(i_d_old->next_inode_disk);
-        i_d_old->next_sector = 0;
-        i_d_old->next_inode_disk = NULL;
-        i_d->length = length_old;
-      }*/
-  /*  if(i_d_lazy != NULL){
-        ASSERT(i_d_lazy->next_sector > 0);
-        free_map_release(i_d_lazy->next_sector, 1);
-        free(i_d_lazy->next_inode_disk);
-        i_d_lazy->next_sector = 0;
-        i_d_lazy->next_inode_disk = NULL;
-      }
-      ASSERT(i_d_end->next_sector > 0);
-      free_map_release(i_d_end->next_sector, 1);
-      free(i_d_end->next_inode_disk);
-      i_d_old->next_sector = 0;
-      i_d_old->next_inode_disk = NULL;
-      i_d->length = length_old;
-      return false;         */
 
 
 

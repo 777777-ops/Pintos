@@ -6,6 +6,7 @@
 #include "filesys/directory.h"
 #ifdef VM
 #include "vm/page.h"
+#include "vm/mmap.h"
 #endif
 
 
@@ -25,19 +26,7 @@ typedef void (*pthread_fun)(void*);
 typedef void (*stub_fun)(pthread_fun, void*);
 
 
-#ifdef VM
-/* mmap */
-struct mmap{
-    struct file* file;
-    void* uaddr;
-};
-#endif
-/* The process control block for a given process. Since
-   there can be multiple threads per process, we need a separate
-   PCB from the TCB. All TCBs in a process will have a pointer
-   to the PCB, and the PCB will have a pointer to the main thread
-   of the process, which is `special`. */
-/* PCB：进程控制块   TCB：线程控制块*/
+
 struct process {
   /* Owned by process.c. */
   uint32_t* pagedir;          /* Page directory. */
@@ -100,9 +89,4 @@ tid_t pthread_join(tid_t);
 void pthread_exit(void);
 void pthread_exit_main(void);
 
-#ifdef VM
-size_t mmap_alloc(struct process* pcb, struct file* file, void* uaddr);
-bool mmap_init(struct process* pcb, struct file* file, void* uaddr);
-void mmap_close(struct process* pcb, int m_t);
-#endif
 #endif /* userprog/process.h */
